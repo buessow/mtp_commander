@@ -1,4 +1,4 @@
-package cc.buessow.androidmtp
+package cc.buessow.mtpcommander
 
 import android.text.format.Formatter
 import androidx.compose.foundation.BorderStroke

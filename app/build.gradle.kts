@@ -4,13 +4,13 @@ plugins {
 }
 
 android {
-    namespace = "cc.buessow.androidmtp"
+    namespace = "cc.buessow.mtpcommander"
     compileSdk {
         version = release(37)
     }
 
     defaultConfig {
-        applicationId = "cc.buessow.androidmtp"
+        applicationId = "cc.buessow.mtpcommander"
         minSdk = 29
         targetSdk = 37
         versionCode = 1

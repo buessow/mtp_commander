@@ -1,4 +1,4 @@
-package cc.buessow.androidmtp.ui.theme
+package cc.buessow.mtpcommander.ui.theme
 
 import android.app.Activity
 import android.os.Build

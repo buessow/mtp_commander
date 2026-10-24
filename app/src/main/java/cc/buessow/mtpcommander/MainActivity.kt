@@ -1,4 +1,4 @@
-package cc.buessow.androidmtp
+package cc.buessow.mtpcommander
 
 import android.app.PendingIntent
 import android.content.BroadcastReceiver
@@ -24,14 +24,14 @@ import androidx.activity.enableEdgeToEdge
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
-import cc.buessow.androidmtp.ui.theme.AndroidMTPTheme
+import cc.buessow.mtpcommander.ui.theme.AndroidMTPTheme
 import java.io.File
 import java.io.FileOutputStream
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import org.json.JSONArray
 
-private const val ACTION_USB_PERMISSION = "cc.buessow.androidmtp.USB_PERMISSION"
+private const val ACTION_USB_PERMISSION = "cc.buessow.mtpcommander.USB_PERMISSION"
 private data class StorageEntry(val id: Int, val name: String)
 private data class DeviceIdentity(val isGarmin: Boolean, val model: String?)
 private data class FileEntry(val handle: Int, val name: String, val directory: Boolean, val size: Long, val modified: Long)

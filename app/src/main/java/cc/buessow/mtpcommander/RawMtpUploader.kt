@@ -1,4 +1,4 @@
-package cc.buessow.androidmtp
+package cc.buessow.mtpcommander
 
 import android.hardware.usb.UsbConstants
 import android.hardware.usb.UsbDevice

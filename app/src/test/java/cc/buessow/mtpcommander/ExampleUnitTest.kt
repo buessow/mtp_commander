@@ -1,4 +1,4 @@
-package cc.buessow.androidmtp
+package cc.buessow.mtpcommander
 
 import org.junit.Test
 
