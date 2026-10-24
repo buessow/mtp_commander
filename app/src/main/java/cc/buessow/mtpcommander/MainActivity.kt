@@ -196,6 +196,10 @@ class MainActivity : ComponentActivity() {
                             panes.any { it.deviceName == device.deviceName }) disconnect(device.deviceName)
                     }
                     refreshDevices()
+                    // Android unmounts a USB drive shortly after it is detached.
+                    listOf(1_500L, 5_000L).forEach { delay ->
+                        android.os.Handler(mainLooper).postDelayed({ if (!isDestroyed) refreshDrives() }, delay)
+                    }
                 }
             }
         }
@@ -640,6 +644,7 @@ class MainActivity : ComponentActivity() {
     private fun refreshDrives(then: () -> Unit = {}) {
         val granted = contentResolver.persistedUriPermissions
             .filter { it.isReadPermission && it.isWritePermission }.map { it.uri }
+        val open = panes.mapNotNull { it.tree }.toSet()
         local.execute {
             val mounted = granted.mapNotNull { uri -> trees.name(uri)?.let { label ->
                 uri to (driveModels.getOrPut(uri) { garminModel(uri) } ?: label)
@@ -647,7 +652,24 @@ class MainActivity : ComponentActivity() {
             driveModels.keys.retainAll(mounted.map { it.first }.toSet())
             val grantedVolumes = mounted.map { trees.rootId(it.first).substringBefore(':') }.toSet()
             val ungranted = mountedUsbVolumes().filter { it !in grantedVolumes }
-            runOnUiThread { if (!isDestroyed) { drives = mounted; ungrantedVolumes = ungranted; then() } }
+            val gone = open.filter { trees.name(it) == null }.toSet()
+            runOnUiThread {
+                if (isDestroyed) return@runOnUiThread
+                drives = mounted
+                ungrantedVolumes = ungranted
+                closeDrives(gone)
+                then()
+            }
+        }
+    }
+
+    /** Main thread: returns panes showing an unplugged drive to the Devices list and forgets its items. */
+    private fun closeDrives(gone: Set<Uri>) {
+        if (gone.isEmpty()) return
+        basket = basket.filter { it.pane.tree !in gone }
+        if (searchOn && searchRoot?.tree in gone) toggleSearch()
+        panes.indices.filter { panes[it].tree in gone }.forEach { index ->
+            update(index) { PaneState(revision = it.revision + 1, status = "The USB drive was disconnected.") }
         }
     }
 
