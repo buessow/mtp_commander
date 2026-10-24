@@ -6,7 +6,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -21,6 +21,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -32,6 +33,11 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
+import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.ReadOnlyComposable
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -52,8 +58,6 @@ import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalContext
@@ -83,7 +87,7 @@ internal data class CommanderPane(
     val title: String, val path: List<CommanderCrumb>, val entries: List<CommanderItem>,
     val status: String, val busy: Boolean, val canBack: Boolean,
     val actionLabel: String, val navigationKey: String,
-    val cursor: String? = null, val draggable: Boolean = false, val progress: Float? = null
+    val cursor: String? = null, val pickable: Boolean = false, val progress: Float? = null
 )
 
 internal enum class CommanderMode { NONE, COPY, DELETE }
@@ -91,19 +95,46 @@ internal enum class CommanderMode { NONE, COPY, DELETE }
 /** A search match; [folder] is its location relative to the folder the search started in. */
 internal data class SearchHit(val item: CommanderItem, val folder: String)
 
-/** While [active], the lower pane lists the hits and the upper pane shows the query, trash or copy [target]. */
+/** While [active], the lower pane lists the hits and the upper pane shows the query or the basket; [target] is
+ * the pane hidden behind it, which copies go into. */
 internal data class SearchState(val active: Boolean, val target: Int, val root: String, val query: String,
     val hits: List<SearchHit>, val busy: Boolean, val status: String)
 
-private data class Drag(val from: Int, val items: List<CommanderItem>, val position: Offset, val hit: Boolean = false)
+/** Screen colours; [onActive] and [onAccent] are for text on the active and accent backgrounds. */
+private class Palette(val paper: Color, val ink: Color, val muted: Color, val divider: Color, val accent: Color,
+    val active: Color, val onActive: Color, val onActiveDetail: Color, val onAccent: Color,
+    val selected: Color, val cursor: Color)
 
-private val paper = Color(0xFFF5F0E8)
-private val ink = Color(0xFF2C455D)
-private val muted = Color(0xFF77716A)
-private val divider = Color(0xFFD9D0C6)
-private val accent = Color(0xFFA75030)
-private val active = Color(0xFF2C455D)
-private val selected = Color(0xFFF0DCC9)
+private val LightPalette = Palette(paper = Color(0xFFF5F0E8), ink = Color(0xFF2C455D), muted = Color(0xFF77716A),
+    divider = Color(0xFFD9D0C6), accent = Color(0xFFA75030), active = Color(0xFF2C455D), onActive = Color(0xFFF5F0E8),
+    onActiveDetail = Color(0xFFE6DBD0), onAccent = Color(0xFFF5F0E8), selected = Color(0xFFF0DCC9),
+    cursor = Color(0xFFEAE2D9))
+
+private val DarkPalette = Palette(paper = Color(0xFF1B1A18), ink = Color(0xFFE4DDD3), muted = Color(0xFF9A938B),
+    divider = Color(0xFF3A3632), accent = Color(0xFFE0875F), active = Color(0xFF34506A), onActive = Color(0xFFF2ECE4),
+    onActiveDetail = Color(0xFFC3CFDA), onAccent = Color(0xFF1B1A18), selected = Color(0xFF4A3B30),
+    cursor = Color(0xFF2C2926))
+
+private val LocalPalette = staticCompositionLocalOf { LightPalette }
+
+/** Follows the phone's dark mode setting. */
+@Composable
+internal fun CommanderTheme(content: @Composable () -> Unit) {
+    CompositionLocalProvider(LocalPalette provides if (isSystemInDarkTheme()) DarkPalette else LightPalette,
+        content = content)
+}
+
+private val paper: Color @Composable @ReadOnlyComposable get() = LocalPalette.current.paper
+private val ink: Color @Composable @ReadOnlyComposable get() = LocalPalette.current.ink
+private val muted: Color @Composable @ReadOnlyComposable get() = LocalPalette.current.muted
+private val divider: Color @Composable @ReadOnlyComposable get() = LocalPalette.current.divider
+private val accent: Color @Composable @ReadOnlyComposable get() = LocalPalette.current.accent
+private val active: Color @Composable @ReadOnlyComposable get() = LocalPalette.current.active
+private val onActive: Color @Composable @ReadOnlyComposable get() = LocalPalette.current.onActive
+private val onActiveDetail: Color @Composable @ReadOnlyComposable get() = LocalPalette.current.onActiveDetail
+private val onAccent: Color @Composable @ReadOnlyComposable get() = LocalPalette.current.onAccent
+private val selected: Color @Composable @ReadOnlyComposable get() = LocalPalette.current.selected
+private val cursorBackground: Color @Composable @ReadOnlyComposable get() = LocalPalette.current.cursor
 private val heading = FontFamily.SansSerif
 
 @Composable
@@ -113,40 +144,30 @@ internal fun CommanderScreen(
     onNavigate: (Int, Int) -> Unit, onAction: (Int) -> Unit, onRefresh: () -> Unit,
     showPhoneAccessExplanation: Boolean, onConfirmPhoneAccess: () -> Unit,
     onDismissPhoneAccess: () -> Unit, mode: CommanderMode, onMode: (CommanderMode) -> Unit,
-    trashPane: Int, trash: List<CommanderItem>, onDrop: (Int, Int, List<CommanderItem>) -> Unit,
-    onRemoveFromTrash: (String) -> Unit, onDelete: () -> Unit,
+    basketPane: Int, basket: List<CommanderItem>, picked: Set<String>,
+    onPick: (Int, List<CommanderItem>) -> Unit, onUnpick: (String) -> Unit,
+    onExecute: () -> Unit, onClear: () -> Unit, executeLabel: String,
     search: SearchState, onSearchToggle: () -> Unit, onSearchQuery: (String) -> Unit, onSearch: () -> Unit,
-    onDropHit: (String) -> Unit, onCursor: (Int, String) -> Unit
+    onPickHit: (String) -> Unit, onCursor: (Int, String) -> Unit
 ) {
     val density = LocalDensity.current
-    val paneBounds = remember { mutableStateListOf(Rect.Zero, Rect.Zero) }
     val buttonBounds = remember { mutableStateListOf(Rect.Zero, Rect.Zero, Rect.Zero) }
-    var drag by remember { mutableStateOf<Drag?>(null) }
     val context = LocalContext.current
     // Each instruction balloon is shown once after install; the preference records which ones were seen.
     val hints = remember { context.getSharedPreferences("hints", android.content.Context.MODE_PRIVATE) }
     val balloon = when {
         mode == CommanderMode.NONE -> null
-        search.active && mode == CommanderMode.COPY -> "search-copy"
-        search.active -> "search-delete"
-        mode == CommanderMode.COPY -> "copy"
-        else -> "delete"
+        search.active && mode == CommanderMode.COPY -> "search-copy-2"
+        search.active -> "search-delete-2"
+        mode == CommanderMode.COPY -> "copy-3"
+        else -> "delete-3"
     }
     var balloonHidden by remember(balloon) { mutableStateOf(balloon == null || hints.getBoolean(balloon, false)) }
     LaunchedEffect(balloon) { if (balloon != null && !balloonHidden) hints.edit().putBoolean(balloon, true).apply() }
-    // Scroll positions live here, not in Pane, so they survive a pane being swapped for the trash or search box.
+    // Scroll positions live here, not in Pane, so they survive a pane being swapped for the basket or search box.
     val listStates = remember { mutableMapOf<String, LazyListState>() }
     listStates.keys.retainAll(panes.map { it.navigationKey }.toSet())
-    val trashSlot = if (search.active) 0 else trashPane
-    fun dropTarget(current: Drag): Int? = paneBounds.indexOfFirst { it.contains(current.position) }
-        .takeIf { it >= 0 && it != current.from && (mode == CommanderMode.COPY || it == trashSlot) }
-    val onDragBy = { amount: Offset -> drag = drag?.let { it.copy(position = it.position + amount) } }
-    val onDragEnd = {
-        drag?.let { current -> dropTarget(current)?.let { target ->
-            if (current.hit) onDropHit(current.items.single().id) else onDrop(current.from, target, current.items)
-        } }
-        drag = null
-    }
+    val basketSlot = if (search.active) 0 else basketPane
     if (showPhoneAccessExplanation) {
         AlertDialog(
             onDismissRequest = onDismissPhoneAccess,
@@ -180,29 +201,26 @@ internal fun CommanderScreen(
                     .border(BorderStroke(0.5.dp, divider)),
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.Center) {
-                    Text(icon, fontSize = 19.sp, color = if (on) paper else muted)
+                    Text(icon, fontSize = 19.sp, color = if (on) onActive else muted)
                     Text(label.uppercase(), fontSize = 10.sp, fontWeight = FontWeight.Bold,
-                        letterSpacing = 0.5.sp, color = if (on) paper else muted)
+                        letterSpacing = 0.5.sp, color = if (on) onActive else muted)
                 }
             }
         }
         panes.indices.forEach { slot ->
             if (slot == 1) Spacer(Modifier.fillMaxWidth().height(1.dp).background(divider))
-            val target = drag?.let(::dropTarget) == slot
             val paneModifier = Modifier.weight(1f)
-                .onGloballyPositioned { paneBounds[slot] = it.boundsInRoot() }
-                .then(if (target) Modifier.border(2.dp, accent) else Modifier)
             // Index of the folder pane shown in this slot; while searching only the copy target is shown.
             val index = if (search.active) search.target else slot
             val pane = panes[index]
-            if (search.active && slot == 1) SearchResults(search,
-                dragEnabled = mode != CommanderMode.NONE,
-                onDragStart = { item, position -> balloonHidden = true; drag = Drag(slot, listOf(item), position, hit = true) },
-                onDragBy = onDragBy, onDragEnd = onDragEnd, onDragCancel = { drag = null }, modifier = paneModifier)
+            if (search.active && slot == 1) SearchResults(search, picked,
+                pickEnabled = mode != CommanderMode.NONE,
+                onPick = { id -> balloonHidden = true; onPickHit(id) }, modifier = paneModifier)
             else if (search.active && mode == CommanderMode.NONE)
                 SearchInput(search, onSearchQuery, onSearch, modifier = paneModifier)
-            else if (mode == CommanderMode.DELETE && slot == trashSlot)
-                Trash(trash, onRemove = onRemoveFromTrash, onDelete = onDelete, modifier = paneModifier)
+            else if (mode != CommanderMode.NONE && slot == basketSlot)
+                Basket(copy = mode == CommanderMode.COPY, basket, onRemove = onUnpick, onExecute = onExecute,
+                    onClear = onClear, executeLabel = executeLabel, modifier = paneModifier)
             else key(index, pane.navigationKey) {
                 Pane(
                     listState = listStates.getOrPut(pane.navigationKey) { LazyListState() },
@@ -214,17 +232,9 @@ internal fun CommanderScreen(
                     onNavigate = { depth -> onActivate(index); onNavigate(index, depth) },
                     onOpen = { item -> if (item.directory) onOpen(index, item) else onActivate(index) },
                     onActivate = { onActivate(index) },
-                    hint = when {
-                        search.active && mode == CommanderMode.COPY -> "DROP RESULTS HERE TO COPY"
-                        mode == CommanderMode.COPY -> "LONG-PRESS & DRAG TO COPY"
-                        mode == CommanderMode.DELETE -> "LONG-PRESS & DRAG TO TRASH"
-                        else -> ""
-                    },
-                    dragEnabled = !search.active && mode != CommanderMode.NONE && pane.draggable && !pane.busy,
-                    onDragStart = { items, position ->
-                        onActivate(index); balloonHidden = true; drag = Drag(slot, items, position)
-                    },
-                    onDragBy = onDragBy, onDragEnd = onDragEnd, onDragCancel = { drag = null },
+                    pickEnabled = !search.active && mode != CommanderMode.NONE && pane.pickable && !pane.busy,
+                    picked = picked,
+                    onPick = { items -> onActivate(index); balloonHidden = true; onPick(index, items) },
                     modifier = paneModifier
                 )
             }
@@ -236,41 +246,38 @@ internal fun CommanderScreen(
     val button = buttonBounds[if (mode == CommanderMode.DELETE) 1 else 0]
     if (balloon != null && !balloonHidden && button != Rect.Zero) {
         val message = when (balloon) {
-            "search-copy" -> "Long-press a search result and drag it into the folder above to copy it there."
-            "search-delete" -> "Long-press search results and drag them into the trash above. Nothing is deleted " +
-                "until you press DELETE in the trash."
-            "copy" -> "Long-press a file and drag it onto the other pane to copy it there. Tap COPY again when done."
-            else -> "Long-press files or folders and drag them into the trash. Nothing is deleted until you " +
-            "press DELETE in the trash; tap an item there to take it out again."
+            "search-copy-2" -> "Tap search results to add them to the copy list above; tap again to take them " +
+                "out. The COPY button copies them into the folder named on it."
+            "search-delete-2" -> "Tap search results to add them to the trash above; tap again to take them out. " +
+                "Nothing is deleted until you press DELETE."
+            "copy-3" -> "Tap files to add them to the copy list, tap again to take them out. Hold to add everything " +
+                "in the folder; tap a folder's ▱ to add the folder itself. Then open the folder to copy into and " +
+                "press COPY."
+            else -> "Tap files to add them to the trash, tap again to take them out. Hold to add everything in the " +
+                "folder; tap a folder's ▱ to add the folder itself. Nothing is deleted until you press DELETE."
         }
         Column(Modifier.offset { IntOffset(0, button.bottom.toInt()) }.fillMaxWidth()
             .clickable { balloonHidden = true }) {
             // Outlined in paper so the balloon stands out on the dark pane and trash headers it overlaps.
+            val arrowFill = ink
+            val arrowEdge = paper
             Canvas(Modifier.offset { IntOffset(button.center.x.toInt() - with(density) { 9.dp.roundToPx() }, 0) }
                 .size(18.dp, 11.dp).zIndex(1f)) {
                 val arrow = Path().apply {
                     moveTo(size.width / 2, 0f); lineTo(size.width, size.height + 2.dp.toPx())
                     lineTo(0f, size.height + 2.dp.toPx()); close()
                 }
-                drawPath(arrow, ink)
-                drawPath(arrow, paper, style = Stroke(2.dp.toPx()))
+                drawPath(arrow, arrowFill)
+                drawPath(arrow, arrowEdge, style = Stroke(2.dp.toPx()))
             }
             Column(Modifier.offset(y = (-2).dp).padding(horizontal = 12.dp).fillMaxWidth()
                 .background(ink, RoundedCornerShape(8.dp)).border(2.dp, paper, RoundedCornerShape(8.dp))
                 .padding(12.dp)) {
                 Text(message, color = paper, fontSize = 13.sp)
-                Text("TAP TO HIDE", color = Color(0xFFE6DBD0), fontSize = 9.sp, letterSpacing = 0.5.sp,
+                Text("TAP TO HIDE", color = paper.copy(alpha = 0.75f), fontSize = 9.sp, letterSpacing = 0.5.sp,
                     modifier = Modifier.padding(top = 6.dp))
             }
         }
-    }
-    drag?.let { current ->
-        Text(if (current.items.size == 1) "▤ ${current.items.single().name}" else "▤ ${current.items.size} items",
-            Modifier.offset { IntOffset(current.position.x.toInt() - with(density) { 24.dp.roundToPx() },
-                current.position.y.toInt() - with(density) { 44.dp.roundToPx() }) }
-                .background(accent, RoundedCornerShape(6.dp)).padding(horizontal = 10.dp, vertical = 6.dp)
-                .widthIn(max = 220.dp),
-            color = paper, fontSize = 13.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
     }
 }
@@ -288,7 +295,10 @@ private fun SearchInput(search: SearchState, onQuery: (String) -> Unit, onSearch
                 // File names and patterns are not words; autocorrect turns "img" into "omg".
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search, autoCorrectEnabled = false,
                     capitalization = KeyboardCapitalization.None, keyboardType = KeyboardType.Uri),
-                keyboardActions = KeyboardActions(onSearch = { onSearch() }))
+                keyboardActions = KeyboardActions(onSearch = { onSearch() }),
+                colors = OutlinedTextFieldDefaults.colors(focusedTextColor = ink, unfocusedTextColor = ink,
+                    focusedBorderColor = accent, unfocusedBorderColor = muted, cursorColor = accent,
+                    focusedPlaceholderColor = muted, unfocusedPlaceholderColor = muted))
             Text("Searches all subfolders. Text matches any part of a name. Use * for any characters and ? for " +
                 "one character; a pattern must then match the whole name. Case is ignored.", color = muted, fontSize = 12.sp)
         }
@@ -296,25 +306,17 @@ private fun SearchInput(search: SearchState, onQuery: (String) -> Unit, onSearch
 }
 
 @Composable
-private fun SearchResults(search: SearchState, dragEnabled: Boolean,
-    onDragStart: (CommanderItem, Offset) -> Unit, onDragBy: (Offset) -> Unit, onDragEnd: () -> Unit,
-    onDragCancel: () -> Unit, modifier: Modifier) {
+private fun SearchResults(search: SearchState, picked: Set<String>, pickEnabled: Boolean,
+    onPick: (String) -> Unit, modifier: Modifier) {
     Column(modifier.background(paper)) {
         PanelHeader("▤", "RESULTS", "${search.hits.size} found")
         LazyColumn(Modifier.weight(1f)) {
             items(search.hits, key = { it.item.id }) { hit ->
-                var coordinates by remember { mutableStateOf<LayoutCoordinates?>(null) }
-                Row(Modifier.fillMaxWidth().height(48.dp)
-                    .onGloballyPositioned { coordinates = it }
-                    .then(if (dragEnabled) Modifier.pointerInput(hit.item.id) {
-                        detectDragGesturesAfterLongPress(
-                            onDragStart = { offset -> onDragStart(hit.item, coordinates?.localToRoot(offset) ?: offset) },
-                            onDrag = { change, amount -> change.consume(); onDragBy(amount) },
-                            onDragEnd = onDragEnd, onDragCancel = onDragCancel)
-                    } else Modifier)
+                val isPicked = pickEnabled && hit.item.id in picked
+                Row(Modifier.fillMaxWidth().height(48.dp).background(if (isPicked) selected else paper)
+                    .clickable(enabled = pickEnabled) { onPick(hit.item.id) }
                     .padding(horizontal = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text(if (hit.item.directory) "▱" else "▤", color = if (hit.item.directory) accent else ink,
-                        fontSize = 17.sp)
+                    ItemIcon(hit.item, isPicked)
                     Spacer(Modifier.width(6.dp))
                     Column(Modifier.weight(1f)) {
                         Text(hit.item.name, maxLines = 1, overflow = TextOverflow.Ellipsis, fontSize = 13.sp, color = ink,
@@ -339,31 +341,36 @@ private fun SearchResults(search: SearchState, dragEnabled: Boolean,
 private fun PanelHeader(symbol: String, title: String, detail: String) {
     Row(Modifier.fillMaxWidth().height(37.dp).background(active).padding(horizontal = 10.dp),
         verticalAlignment = Alignment.CenterVertically) {
-        Text(symbol, color = paper, fontSize = 17.sp)
+        Text(symbol, color = onActive, fontSize = 17.sp)
         Spacer(Modifier.width(7.dp))
-        Text(title, color = paper, fontSize = 15.sp, fontWeight = FontWeight.Bold, letterSpacing = 0.8.sp)
+        Text(title, color = onActive, fontSize = 15.sp, fontWeight = FontWeight.Bold, letterSpacing = 0.8.sp)
         Spacer(Modifier.width(10.dp))
-        Text(detail, Modifier.weight(1f), color = Color(0xFFE6DBD0), fontSize = 11.sp, maxLines = 1,
+        Text(detail, Modifier.weight(1f), color = onActiveDetail, fontSize = 11.sp, maxLines = 1,
             overflow = TextOverflow.Ellipsis, textAlign = TextAlign.End)
     }
 }
 
+/** The copy list or the trash: what was picked, with buttons to empty it and to copy or delete it all. */
 @Composable
-private fun Trash(entries: List<CommanderItem>, onRemove: (String) -> Unit, onDelete: () -> Unit, modifier: Modifier) {
+private fun Basket(copy: Boolean, entries: List<CommanderItem>, onRemove: (String) -> Unit, onExecute: () -> Unit,
+    onClear: () -> Unit, executeLabel: String, modifier: Modifier) {
+    val header = if (copy) active else accent
+    val onHeader = if (copy) onActive else onAccent
     Column(modifier.background(paper)) {
-        Row(Modifier.fillMaxWidth().height(37.dp).background(accent).padding(horizontal = 10.dp),
+        Row(Modifier.fillMaxWidth().height(37.dp).background(header).padding(horizontal = 10.dp),
             verticalAlignment = Alignment.CenterVertically) {
-            Text("🗑", fontSize = 17.sp)
+            Text(if (copy) "▣" else "🗑", color = onHeader, fontSize = 17.sp)
             Spacer(Modifier.width(7.dp))
-            Text("TRASH", color = paper, fontSize = 15.sp, fontWeight = FontWeight.Bold, letterSpacing = 0.8.sp)
+            Text(if (copy) "COPY LIST" else "TRASH", color = onHeader, fontSize = 15.sp, fontWeight = FontWeight.Bold,
+                letterSpacing = 0.8.sp)
             Spacer(Modifier.weight(1f))
-            Text("${entries.size} item${if (entries.size == 1) "" else "s"}", color = paper, fontSize = 11.sp)
+            Text("${entries.size} item${if (entries.size == 1) "" else "s"}", color = onHeader, fontSize = 11.sp)
         }
         LazyColumn(Modifier.weight(1f)) {
             items(entries, key = { it.id }) { item ->
                 Row(Modifier.fillMaxWidth().height(40.dp).clickable { onRemove(item.id) }
                     .padding(horizontal = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text(if (item.directory) "▱" else "▤", color = if (item.directory) accent else ink, fontSize = 17.sp)
+                    ItemIcon(item, picked = false)
                     Spacer(Modifier.width(6.dp))
                     Text(item.name, Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis,
                         fontSize = 13.sp, color = ink)
@@ -372,18 +379,30 @@ private fun Trash(entries: List<CommanderItem>, onRemove: (String) -> Unit, onDe
                 Spacer(Modifier.fillMaxWidth().height(0.5.dp).background(divider.copy(alpha = 0.5f)))
             }
             if (entries.isEmpty()) item {
-                Text("Drag files and folders here. They are only deleted when you press DELETE.",
-                    Modifier.padding(18.dp), color = muted, fontSize = 12.sp)
+                Text(if (copy) "Tap files in the other pane to add them here, then open the folder to copy into " +
+                    "and press COPY." else "Tap files in the other pane to add them here. They are only deleted " +
+                    "when you press DELETE.", Modifier.padding(18.dp), color = muted, fontSize = 12.sp)
             }
         }
-        Text("DELETE ${entries.size} ITEM${if (entries.size == 1) "" else "S"}",
-            Modifier.fillMaxWidth().height(44.dp)
-                .background(if (entries.isEmpty()) divider else accent)
-                .clickable(enabled = entries.isNotEmpty(), onClick = onDelete)
-                .padding(vertical = 13.dp),
-            color = paper, fontSize = 13.sp, fontWeight = FontWeight.Bold, letterSpacing = 0.8.sp,
-            textAlign = TextAlign.Center)
+        Row(Modifier.fillMaxWidth().height(44.dp)) {
+            Text("CLEAR", Modifier.width(96.dp).fillMaxSize().border(BorderStroke(0.5.dp, divider))
+                .clickable(enabled = entries.isNotEmpty(), onClick = onClear).padding(vertical = 13.dp),
+                color = if (entries.isEmpty()) muted else ink, fontSize = 13.sp, fontWeight = FontWeight.Bold,
+                letterSpacing = 0.8.sp, textAlign = TextAlign.Center)
+            Text(executeLabel, Modifier.weight(1f).fillMaxSize().background(if (entries.isEmpty()) divider else header)
+                .clickable(enabled = entries.isNotEmpty(), onClick = onExecute)
+                .padding(horizontal = 10.dp, vertical = 13.dp),
+                color = onHeader, fontSize = 13.sp, fontWeight = FontWeight.Bold, letterSpacing = 0.8.sp,
+                textAlign = TextAlign.Center, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
     }
+}
+
+@Composable
+private fun ItemIcon(item: CommanderItem, picked: Boolean, modifier: Modifier = Modifier) {
+    Text(if (picked) "✓" else if (item.directory) "▱" else "▤", modifier,
+        color = if (picked || item.directory) accent else ink, fontSize = 17.sp, fontWeight = FontWeight.Bold,
+        textAlign = TextAlign.Center)
 }
 
 @Composable
@@ -392,9 +411,8 @@ private fun Pane(
     isActive: Boolean, isBusy: Boolean, emptyMessage: String,
     cursor: String?, onCursor: (String) -> Unit, progress: Float?,
     actionLabel: String, onAction: () -> Unit, onNavigate: (Int) -> Unit,
-    onOpen: (CommanderItem) -> Unit, onActivate: () -> Unit, hint: String, dragEnabled: Boolean,
-    onDragStart: (List<CommanderItem>, Offset) -> Unit, onDragBy: (Offset) -> Unit,
-    onDragEnd: () -> Unit, onDragCancel: () -> Unit, modifier: Modifier
+    onOpen: (CommanderItem) -> Unit, onActivate: () -> Unit, pickEnabled: Boolean, picked: Set<String>,
+    onPick: (List<CommanderItem>) -> Unit, modifier: Modifier
 ) {
     val context = LocalContext.current
     val pathScroll = rememberScrollState()
@@ -404,9 +422,9 @@ private fun Pane(
             .background(if (isActive) active else paper)
             .clickable(onClick = onActivate).padding(horizontal = 10.dp),
             verticalAlignment = Alignment.CenterVertically) {
-            Text(symbol, color = if (isActive) paper else accent, fontSize = 17.sp)
+            Text(symbol, color = if (isActive) onActive else accent, fontSize = 17.sp)
             Spacer(Modifier.width(7.dp))
-            Text(title, Modifier.widthIn(max = 86.dp), color = if (isActive) paper else ink,
+            Text(title, Modifier.widthIn(max = 86.dp), color = if (isActive) onActive else ink,
                 fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
                 fontWeight = FontWeight.Bold, letterSpacing = 0.8.sp)
             Spacer(Modifier.width(8.dp))
@@ -414,13 +432,11 @@ private fun Pane(
                 horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically) {
                 path.forEachIndexed { index, crumb ->
                     if (index > 0) Text(" / ", color = muted, fontSize = 11.sp)
-                    Text(crumb.label, color = if (isActive) Color(0xFFE6DBD0) else muted,
+                    Text(crumb.label, color = if (isActive) onActiveDetail else muted,
                         fontSize = 11.sp, maxLines = 1,
                         modifier = Modifier.clickable { onNavigate(crumb.depth) })
                 }
             }
-            Text(" ⋯ ", color = if (isActive) paper else accent,
-                modifier = Modifier.clickable(onClick = onAction), fontSize = 20.sp)
         }
         Row(Modifier.fillMaxWidth().height(23.dp).border(BorderStroke(0.5.dp, divider)),
             verticalAlignment = Alignment.CenterVertically) {
@@ -431,20 +447,20 @@ private fun Pane(
         }
         LazyColumn(Modifier.weight(1f), state = listState) {
             items(entries, key = { it.id }) { item ->
-                var coordinates by remember { mutableStateOf<LayoutCoordinates?>(null) }
+                val isPicked = pickEnabled && item.id in picked
+                // While picking, a tap picks a file and opens a folder; a hold picks everything in the folder.
                 Row(Modifier.fillMaxWidth().height(40.dp)
-                    .onGloballyPositioned { coordinates = it }
-                    .then(if (dragEnabled) Modifier.pointerInput(item.id) {
-                        detectDragGesturesAfterLongPress(
-                            onDragStart = { offset -> onDragStart(listOf(item), coordinates?.localToRoot(offset) ?: offset) },
-                            onDrag = { change, amount -> change.consume(); onDragBy(amount) },
-                            onDragEnd = onDragEnd, onDragCancel = onDragCancel)
-                    } else Modifier)
-                    .background(if (isActive && cursor == item.id) selected else if (cursor == item.id) Color(0xFFEAE2D9) else paper)
-                    .clickable { onCursor(item.id); onOpen(item) }, verticalAlignment = Alignment.CenterVertically) {
-                    Spacer(Modifier.width(10.dp))
-                    Text(if (item.directory) "▱" else "▤", color = if (item.directory) accent else ink, fontSize = 17.sp)
-                    Spacer(Modifier.width(6.dp))
+                    .background(if (isPicked || isActive && cursor == item.id) selected
+                        else if (cursor == item.id) cursorBackground else paper)
+                    .combinedClickable(
+                        onLongClick = if (pickEnabled) ({ onPick(entries) }) else null,
+                        onClick = {
+                            onCursor(item.id)
+                            if (pickEnabled && !item.directory) onPick(listOf(item)) else onOpen(item)
+                        }), verticalAlignment = Alignment.CenterVertically) {
+                    // The icon is a separate target so folders can be picked without opening them.
+                    ItemIcon(item, isPicked, Modifier.width(34.dp).fillMaxSize().wrapContentHeight()
+                        .then(if (pickEnabled) Modifier.clickable { onPick(listOf(item)) } else Modifier))
                     Text(item.name, Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis,
                         fontWeight = if (item.directory) FontWeight.SemiBold else FontWeight.Normal,
                         fontSize = 13.sp, color = ink)
@@ -474,7 +490,7 @@ private fun Pane(
             .padding(horizontal = 10.dp), verticalAlignment = Alignment.CenterVertically) {
             Text("${entries.size} items", fontSize = 11.sp, color = muted)
             Spacer(Modifier.weight(1f))
-            Text(hint, fontSize = 10.sp, color = accent, letterSpacing = 0.5.sp)
+            if (pickEnabled) Text("TAP: ADD · HOLD: ALL", fontSize = 10.sp, color = accent, letterSpacing = 0.5.sp)
         }
     }
 }

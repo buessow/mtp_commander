@@ -17,6 +17,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
+import android.provider.DocumentsContract
 import android.provider.Settings
 import android.text.format.Formatter
 import androidx.activity.ComponentActivity
@@ -46,12 +47,13 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 
 private const val GARMIN_VENDOR_ID = 0x091e
+private const val EXTERNAL_STORAGE_AUTHORITY = "com.android.externalstorage.documents"
 private const val ACTION_USB_PERMISSION = "cc.buessow.mtpcommander.USB_PERMISSION"
 private data class StorageEntry(val id: Int, val name: String)
 private data class DeviceIdentity(val isGarmin: Boolean, val model: String?)
 private data class FileEntry(val handle: Int, val name: String, val directory: Boolean, val size: Long, val modified: Long)
 private data class Folder(val handle: Int, val name: String)
-private enum class Source { DEVICES, PHONE, MTP, DRIVE }
+private enum class Source { DEVICES, PHONE, MTP, DRIVE, USB }
 private val DRIVE_ROOT = DriveFolder(DriveClient.ROOT, "My Drive")
 private enum class Overwrite { REPLACE, SKIP, STOP }
 /** A copy waiting on the worker until the user decides about an item that already exists; the flag means "for all". */
@@ -62,8 +64,12 @@ private data class PaneState(
     val deviceName: String? = null,
     val storage: StorageEntry? = null,
     val folders: List<Folder> = emptyList(),
+    // Empty at the phone's own level (Storage and the standard folders); otherwise starts with the opened one.
     val phoneFolders: List<File> = emptyList(),
     val driveFolders: List<DriveFolder> = emptyList(),
+    // A USB drive, or another folder granted through Android's folder picker, and the folders open in it.
+    val tree: Uri? = null,
+    val docFolders: List<DocFolder> = emptyList(),
     val entries: List<CommanderItem> = emptyList(),
     val status: String = "Select a device to browse.",
     val busy: Boolean = false,
@@ -105,6 +111,23 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    // USB drives are read through Android's storage provider; this keeps their queries off the USB worker.
+    private val local = Executors.newSingleThreadExecutor()
+    private val trees by lazy { DocumentTrees(contentResolver) }
+    // Granted drives that are mounted now, mounted drives not granted yet, and how many USB drives are plugged in.
+    private var drives by mutableStateOf<List<Pair<Uri, String>>>(emptyList())
+    private var ungrantedVolumes by mutableStateOf<List<String>>(emptyList())
+    private var massStorageCount by mutableStateOf(0)
+    private var drivePickerPane = 0
+    // Garmin model names read from mounted drives, or null for other drives; only used on the local executor.
+    private val driveModels = mutableMapOf<Uri, String?>()
+    private val drivePicker = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+        if (uri == null) return@registerForActivityResult
+        contentResolver.takePersistableUriPermission(uri,
+            Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+        refreshDrives { if (panes[drivePickerPane].source == Source.DEVICES) openDrive(drivePickerPane, uri) }
+    }
+
     private var devices by mutableStateOf<List<UsbDevice>>(emptyList())
     private var identities by mutableStateOf<Map<String, DeviceIdentity>>(emptyMap())
     private var storages by mutableStateOf<Map<String, List<StorageEntry>>>(emptyMap())
@@ -114,9 +137,9 @@ class MainActivity : ComponentActivity() {
     private var showPhoneAccessExplanation by mutableStateOf(false)
     private var overwritePrompt by mutableStateOf<OverwritePrompt?>(null)
     private var mode by mutableStateOf(CommanderMode.NONE)
-    // In delete mode this pane shows the trash; items are dragged into it from the other pane.
-    private var trashPane by mutableStateOf(1)
-    private var trash by mutableStateOf<List<TrashEntry>>(emptyList())
+    // In copy and delete mode this pane shows the basket: the copy list or the trash, filled from the other pane.
+    private var basketPane by mutableStateOf(1)
+    private var basket by mutableStateOf<List<BasketEntry>>(emptyList())
     // Search runs recursively below the folder that was open in searchPane when search mode started.
     private var searchOn by mutableStateOf(false)
     private var searchPane = 0
@@ -128,11 +151,17 @@ class MainActivity : ComponentActivity() {
     private var searchStatus by mutableStateOf("")
     private var searchGeneration = 0
     private data class SearchResult(val hit: SearchHit, val phoneFolders: List<File>, val folders: List<Folder>,
-        val driveFolders: List<DriveFolder> = emptyList())
-    private data class TrashEntry(val pane: PaneState, val item: CommanderItem, val epoch: Int?) {
-        val key = "${pane.deviceName ?: "phone"}:${item.id}"
+        val driveFolders: List<DriveFolder> = emptyList(), val docFolders: List<DocFolder> = emptyList())
+    /** An item picked for copying or deleting, with the folder it was picked in. */
+    private data class BasketEntry(val pane: PaneState, val item: CommanderItem, val epoch: Int?) {
+        val key = "${pane.deviceName ?: pane.source.name}:${item.id}"
     }
     private val phoneRoot by lazy { Environment.getExternalStorageDirectory() }
+    // The phone's standard folders, listed next to Storage when the phone is opened.
+    private val phoneShortcuts = listOf(Environment.DIRECTORY_DOCUMENTS to "Documents",
+        Environment.DIRECTORY_DOWNLOADS to "Downloads", Environment.DIRECTORY_PICTURES to "Pictures",
+        Environment.DIRECTORY_DCIM to "Camera", Environment.DIRECTORY_MUSIC to "Music",
+        Environment.DIRECTORY_MOVIES to "Movies")
     private val phoneLabel = listOf(Build.MANUFACTURER, Build.MODEL).map { it.trim() }
         .filter { it.isNotEmpty() }.distinctBy { it.lowercase() }.joinToString(" ").ifEmpty { "Phone" }
 
@@ -147,7 +176,13 @@ class MainActivity : ComponentActivity() {
                         usbManager.deviceList.containsKey(device.deviceName)) openDevice(device)
                     else failDevice(device.deviceName, "USB access denied or device disconnected. Select the device to retry.")
                 }
-                UsbManager.ACTION_USB_DEVICE_ATTACHED -> refreshDevices()
+                UsbManager.ACTION_USB_DEVICE_ATTACHED -> {
+                    refreshDevices()
+                    // A USB drive is mounted a few seconds after it is attached.
+                    listOf(3_000L, 8_000L).forEach { delay ->
+                        android.os.Handler(mainLooper).postDelayed({ if (!isDestroyed) refreshDrives() }, delay)
+                    }
+                }
                 UsbManager.ACTION_USB_DEVICE_DETACHED -> {
                     intent.usbDevice()?.let { device ->
                         identities = identities - device.deviceName
@@ -170,11 +205,11 @@ class MainActivity : ComponentActivity() {
         }, RECEIVER_NOT_EXPORTED)
         setContent {
             BackHandler(enabled = canBack(panes[activePane])) { goBack(activePane) }
-            AndroidMTPTheme(darkTheme = false, dynamicColor = false) {
+            AndroidMTPTheme(dynamicColor = false) { CommanderTheme {
                 CommanderScreen(
                     panes = panes.mapIndexed { index, pane -> paneData(index, pane) },
                     activePane = activePane,
-                    onActivate = { if (mode != CommanderMode.DELETE || it != trashPane) activePane = it },
+                    onActivate = { if (mode == CommanderMode.NONE || it != basketPane) activePane = it },
                     onOpen = { index, item -> activePane = index; openItem(index, item) },
                     onNavigate = ::navigateTo, onAction = { index ->
                         if (panes[index].source == Source.PHONE && !phoneAccess())
@@ -185,23 +220,22 @@ class MainActivity : ComponentActivity() {
                     showPhoneAccessExplanation = showPhoneAccessExplanation,
                     onConfirmPhoneAccess = ::requestPhoneAccess,
                     onDismissPhoneAccess = { showPhoneAccessExplanation = false },
-                    mode = mode, onMode = ::toggleMode, trashPane = trashPane,
-                    trash = trash.map { it.item.copy(id = it.key) },
-                    onDrop = { from, to, items ->
-                        if (mode == CommanderMode.COPY && to == 1 - from) startCopy(from, items)
-                        else if (mode == CommanderMode.DELETE && to == trashPane && from != trashPane)
-                            addToTrash(from, items)
-                    },
-                    onRemoveFromTrash = { key -> trash = trash.filter { it.key != key } },
-                    onDelete = ::deleteTrash,
+                    mode = mode, onMode = ::toggleMode, basketPane = basketPane,
+                    basket = basket.map { it.item.copy(id = it.key) },
+                    picked = basket.mapTo(mutableSetOf()) { it.item.id },
+                    onPick = { index, items -> pick(index, items) },
+                    onUnpick = { key -> basket = basket.filter { it.key != key } },
+                    onExecute = { if (mode == CommanderMode.DELETE) deleteTrash() else copyBasket() },
+                    onClear = { basket = emptyList() },
+                    executeLabel = executeLabel(),
                     search = SearchState(searchOn, 1 - searchPane, searchRootLabel, searchQuery,
                         searchHits.map { it.hit }, searchBusy, searchStatus),
                     onSearchToggle = ::toggleSearch, onSearchQuery = { searchQuery = it }, onSearch = ::startSearch,
-                    onDropHit = ::dropSearchHit,
+                    onPickHit = ::pickSearchHit,
                     onCursor = { index, id -> update(index) { it.copy(cursor = id) } }
                 )
                 overwritePrompt?.let { OverwriteDialog(it) }
-            }
+            } }
         }
         refreshDevices()
     }
@@ -243,7 +277,7 @@ class MainActivity : ComponentActivity() {
         refreshDevices()
         if (phoneAccess()) panes.indices.filter { panes[it].source == Source.PHONE && !panes[it].busy }
             .forEach { listPhoneFolder(it) }
-        else panes.indices.filter { panes[it].source == Source.PHONE }.forEach { index ->
+        else panes.indices.filter { panes[it].source == Source.PHONE && panes[it].phoneFolders.isNotEmpty() }.forEach { index ->
             update(index) { it.copy(entries = emptyList(), busy = false,
                 status = "Grant all-files access to browse shared storage (read-only).", revision = it.revision + 1) }
         }
@@ -259,11 +293,20 @@ class MainActivity : ComponentActivity() {
         val deviceStorages = storages[pane.deviceName].orEmpty()
         val entries = when (pane.source) {
             Source.DEVICES -> listOf(CommanderItem("local:phone", phoneLabel, true, -1, 0),
-                CommanderItem("local:drive", "Google Drive", true, -1, 0)) + devices.map { device ->
-                CommanderItem(device.deviceName, identities[device.deviceName]?.let(::deviceModelLabel)
-                    ?: device.productName ?: "MTP device", true, -1, 0)
-            }
-            Source.PHONE, Source.DRIVE -> pane.entries
+                CommanderItem("local:drive", "Google Drive", true, -1, 0)) +
+                drives.map { (uri, label) -> CommanderItem("tree:$uri", label, true, -1, 0) } +
+                ungrantedVolumes.map { CommanderItem("tree:new:$it", "USB drive · tap to allow access", true, -1, 0) } +
+                // Without the mount table, fall back to counting USB drives.
+                (if (ungrantedVolumes.isEmpty() && massStorageCount > drives.size) listOf(CommanderItem("tree:",
+                    "USB drive · tap to allow access", true, -1, 0)) else emptyList()) +
+                devices.map { device ->
+                    CommanderItem(device.deviceName, identities[device.deviceName]?.let(::deviceModelLabel)
+                        ?: device.productName ?: "MTP device", true, -1, 0)
+                }
+            Source.PHONE -> if (pane.phoneFolders.isEmpty()) listOf(CommanderItem("phone:", "Storage", true, -1, 0)) +
+                phoneShortcuts.map { (folder, label) -> CommanderItem("phone:$folder", label, true, -1, 0) }
+                else pane.entries
+            Source.DRIVE, Source.USB -> pane.entries
             Source.MTP -> if (pane.storage == null && !pane.busy) deviceStorages.map {
                 CommanderItem(it.id.toString(), it.name, true, -1, 0)
             } else pane.entries
@@ -271,9 +314,13 @@ class MainActivity : ComponentActivity() {
         val path = when (pane.source) {
             Source.DEVICES -> listOf(CommanderCrumb("Devices", 0))
             Source.PHONE -> listOf(CommanderCrumb("Devices", -1), CommanderCrumb(phoneLabel, 0)) +
-                pane.phoneFolders.drop(1).mapIndexed { i, folder -> CommanderCrumb(folder.name, i + 1) }
+                pane.phoneFolders.mapIndexed { i, folder ->
+                    CommanderCrumb(if (i == 0) phoneFolderLabel(folder) else folder.name, i + 1)
+                }
             Source.DRIVE -> listOf(CommanderCrumb("Devices", -1), CommanderCrumb("Google Drive", 0)) +
                 pane.driveFolders.drop(1).mapIndexed { i, folder -> CommanderCrumb(folder.name, i + 1) }
+            Source.USB -> listOf(CommanderCrumb("Devices", -1)) +
+                pane.docFolders.mapIndexed { i, folder -> CommanderCrumb(folder.name, i) }
             Source.MTP -> listOf(CommanderCrumb("Devices", -1), CommanderCrumb(name ?: "MTP device", 0)) +
                 (if (deviceStorages.size > 1 && pane.storage?.name != "Internal storage")
                     listOfNotNull(pane.storage?.let { CommanderCrumb(it.name, 1) }) else emptyList()) +
@@ -286,16 +333,18 @@ class MainActivity : ComponentActivity() {
                 Source.DEVICES -> "Devices"
                 Source.PHONE -> phoneLabel
                 Source.DRIVE -> "Google Drive"
+                Source.USB -> pane.docFolders.firstOrNull()?.name ?: "USB drive"
                 Source.MTP -> name ?: "MTP device"
             },
             path = path, entries = entries, status = if (pane.source == Source.DEVICES && devices.isEmpty())
                 "No MTP devices found. Check USB cable and file transfer mode, then refresh. The phone is available above."
                 else pane.status,
             busy = pane.busy, canBack = canBack(pane),
-            draggable = pane.source == Source.PHONE || pane.source == Source.DRIVE ||
+            pickable = pane.source == Source.PHONE && pane.phoneFolders.isNotEmpty() || pane.source == Source.DRIVE ||
+                pane.source == Source.USB ||
                 pane.source == Source.MTP && pane.storage != null,
             actionLabel = if (pane.source == Source.PHONE && !phoneAccess()) "Grant all-files access" else "Refresh",
-            navigationKey = "$index:${pane.source}:${pane.deviceName}:${pane.storage?.id}:${pane.folders.map { it.handle }}:${pane.phoneFolders.map { it.path }}:${pane.driveFolders.map { it.id }}",
+            navigationKey = "$index:${pane.source}:${pane.deviceName}:${pane.storage?.id}:${pane.folders.map { it.handle }}:${pane.phoneFolders.map { it.path }}:${pane.driveFolders.map { it.id }}:${pane.tree}:${pane.docFolders.map { it.id }}",
             cursor = pane.cursor, progress = pane.progress
         )
     }
@@ -309,11 +358,8 @@ class MainActivity : ComponentActivity() {
             Source.DEVICES -> Unit
             Source.PHONE -> if (depth < 0) {
                 update(index) { PaneState(revision = it.revision + 1) }
-            } else if (depth == 0) {
-                update(index) { it.copy(phoneFolders = listOf(phoneRoot)) }
-                listPhoneFolder(index)
             } else if (depth < pane.phoneFolders.size) {
-                update(index) { it.copy(phoneFolders = it.phoneFolders.take(depth + 1)) }
+                update(index) { it.copy(phoneFolders = it.phoneFolders.take(depth)) }
                 listPhoneFolder(index)
             }
             Source.DRIVE -> if (depth < 0) {
@@ -321,6 +367,12 @@ class MainActivity : ComponentActivity() {
             } else if (depth < pane.driveFolders.size) {
                 update(index) { it.copy(driveFolders = it.driveFolders.take(depth + 1)) }
                 listDriveFolder(index)
+            }
+            Source.USB -> if (depth < 0) {
+                update(index) { PaneState(revision = it.revision + 1) }
+            } else if (depth < pane.docFolders.size) {
+                update(index) { it.copy(docFolders = it.docFolders.take(depth + 1)) }
+                listUsbFolder(index)
             }
             Source.MTP -> {
                 val count = storages[pane.deviceName].orEmpty().size
@@ -351,17 +403,31 @@ class MainActivity : ComponentActivity() {
         if (pane.busy || !item.directory) return
         when (pane.source) {
             Source.DEVICES -> if (item.id == "local:phone") {
-                update(index) { PaneState(source = Source.PHONE, phoneFolders = listOf(phoneRoot), revision = it.revision + 1) }
+                update(index) { PaneState(source = Source.PHONE, revision = it.revision + 1) }
+                listPhoneFolder(index)
+            } else if (item.id == "local:drive") {
+                update(index) { PaneState(source = Source.DRIVE, driveFolders = listOf(DRIVE_ROOT), revision = it.revision + 1) }
+                listDriveFolder(index)
+            } else if (item.id == "tree:" || item.id.startsWith("tree:new:")) {
+                // Android only exposes USB drives through its folder picker; the grant is kept for later.
+                // Opening the picker at the drive's top level leaves just "Use this folder" to tap.
+                drivePickerPane = index
+                drivePicker.launch(item.id.removePrefix("tree:new:").takeIf { it != item.id }?.let {
+                    DocumentsContract.buildDocumentUri(EXTERNAL_STORAGE_AUTHORITY, "$it:")
+                })
+            } else if (item.id.startsWith("tree:")) {
+                openDrive(index, Uri.parse(item.id.removePrefix("tree:")))
+            } else devices.firstOrNull { it.deviceName == item.id }?.let { selectDevice(index, it) }
+            Source.PHONE -> if (pane.phoneFolders.isEmpty()) {
+                // "phone:" is Storage itself; the others are standard folders below it.
+                val folder = item.id.removePrefix("phone:").let { if (it.isEmpty()) phoneRoot else File(phoneRoot, it) }
+                update(index) { it.copy(phoneFolders = listOf(folder)) }
                 if (phoneAccess()) listPhoneFolder(index) else {
                     update(index) { it.copy(status = "Grant all-files access to browse shared storage (read-only).") }
                     showPhoneAccessExplanation = true
                 }
-            } else if (item.id == "local:drive") {
-                update(index) { PaneState(source = Source.DRIVE, driveFolders = listOf(DRIVE_ROOT), revision = it.revision + 1) }
-                listDriveFolder(index)
-            } else devices.firstOrNull { it.deviceName == item.id }?.let { selectDevice(index, it) }
-            Source.PHONE -> {
-                val folder = pane.phoneFolders.lastOrNull() ?: return
+            } else {
+                val folder = pane.phoneFolders.last()
                 val child = File(folder, item.name)
                 if (child.path == item.id && isInPhoneStorage(child) && child.isDirectory) {
                     update(index) { it.copy(phoneFolders = it.phoneFolders + child) }
@@ -371,6 +437,10 @@ class MainActivity : ComponentActivity() {
             Source.DRIVE -> {
                 update(index) { it.copy(driveFolders = it.driveFolders + DriveFolder(item.id, item.name)) }
                 listDriveFolder(index)
+            }
+            Source.USB -> {
+                update(index) { it.copy(docFolders = it.docFolders + DocFolder(item.id, item.name)) }
+                listUsbFolder(index)
             }
             Source.MTP -> if (pane.storage == null) {
                 storages[pane.deviceName].orEmpty().firstOrNull { it.id.toString() == item.id }?.let { openStorage(index, it) }
@@ -387,7 +457,7 @@ class MainActivity : ComponentActivity() {
         if (pane.busy) return
         when (pane.source) {
             Source.DEVICES -> Unit
-            Source.PHONE -> if (pane.phoneFolders.size <= 1) update(index) { PaneState(revision = it.revision + 1) }
+            Source.PHONE -> if (pane.phoneFolders.isEmpty()) update(index) { PaneState(revision = it.revision + 1) }
                 else {
                     update(index) { it.copy(phoneFolders = it.phoneFolders.dropLast(1)) }
                     listPhoneFolder(index)
@@ -396,6 +466,11 @@ class MainActivity : ComponentActivity() {
                 else {
                     update(index) { it.copy(driveFolders = it.driveFolders.dropLast(1)) }
                     listDriveFolder(index)
+                }
+            Source.USB -> if (pane.docFolders.size <= 1) update(index) { PaneState(revision = it.revision + 1) }
+                else {
+                    update(index) { it.copy(docFolders = it.docFolders.dropLast(1)) }
+                    listUsbFolder(index)
                 }
             Source.MTP -> when {
                 pane.folders.isNotEmpty() -> {
@@ -441,9 +516,18 @@ class MainActivity : ComponentActivity() {
         path == root || path.startsWith("$root${File.separator}")
     } catch (_: Exception) { false }
 
+    private fun phoneFolderLabel(folder: File) = if (folder == phoneRoot) "Storage"
+        else phoneShortcuts.firstOrNull { File(phoneRoot, it.first) == folder }?.second ?: folder.name
+
     private fun listPhoneFolder(index: Int, completionStatus: String? = null) {
         val pane = panes[index]
         if (pane.source != Source.PHONE) return
+        // The phone's own level is a fixed list that needs no file access.
+        if (pane.phoneFolders.isEmpty()) {
+            update(index) { it.copy(entries = emptyList(), busy = false, cursor = null, revision = it.revision + 1,
+                status = completionStatus ?: "Storage and standard folders") }
+            return
+        }
         if (!phoneAccess()) {
             update(index) { it.copy(entries = emptyList(), busy = false, revision = it.revision + 1,
                 status = "Grant all-files access to browse shared storage (read-only).") }
@@ -533,6 +617,73 @@ class MainActivity : ComponentActivity() {
         val missing = (panes.mapNotNull { it.deviceName } + readyDevices + pendingDeviceNames)
             .filter { it !in connected }.toSet()
         missing.forEach(::disconnect)
+        massStorageCount = usbManager.deviceList.values.count { device ->
+            (0 until device.interfaceCount).any { device.getInterface(it).interfaceClass == UsbConstants.USB_CLASS_MASS_STORAGE }
+        }
+        refreshDrives()
+    }
+
+    /** Lists the granted drives that are mounted; a drive's grant outlives unplugging it. */
+    private fun refreshDrives(then: () -> Unit = {}) {
+        val granted = contentResolver.persistedUriPermissions
+            .filter { it.isReadPermission && it.isWritePermission }.map { it.uri }
+        local.execute {
+            val mounted = granted.mapNotNull { uri -> trees.name(uri)?.let { label ->
+                uri to (driveModels.getOrPut(uri) { garminModel(uri) } ?: label)
+            } }
+            driveModels.keys.retainAll(mounted.map { it.first }.toSet())
+            val grantedVolumes = mounted.map { trees.rootId(it.first).substringBefore(':') }.toSet()
+            val ungranted = mountedUsbVolumes().filter { it !in grantedVolumes }
+            runOnUiThread { if (!isDestroyed) { drives = mounted; ungrantedVolumes = ungranted; then() } }
+        }
+    }
+
+    /** On the local executor: a Garmin in USB drive mode names its model in GARMIN/Device.fit. */
+    private fun garminModel(tree: Uri): String? = runCatching {
+        val garmin = trees.list(tree, trees.rootId(tree))
+            .firstOrNull { it.folder && it.name.equals("GARMIN", ignoreCase = true) } ?: return null
+        val fit = trees.list(tree, garmin.id)
+            .firstOrNull { !it.folder && it.name.equals("Device.fit", ignoreCase = true) } ?: return null
+        GarminModel.productId(trees.read(tree, fit.id, 64 * 1024))?.let { GarminModel.name(this, it) }
+    }.getOrNull()
+
+    /**
+     * File system IDs of mounted USB drives. Android hides these volumes from apps, but they still appear in the
+     * app's mount table, and the ID is also the drive's root document in Android's storage provider.
+     */
+    private fun mountedUsbVolumes(): List<String> = runCatching {
+        File("/proc/self/mountinfo").readLines()
+            .mapNotNull { Regex(" /mnt/media_rw/([^ /]+) ").find(it)?.groupValues?.get(1) }.distinct()
+    }.getOrDefault(emptyList())
+
+    private fun openDrive(index: Int, tree: Uri) {
+        val label = drives.firstOrNull { it.first == tree }?.second ?: "USB drive"
+        update(index) { PaneState(source = Source.USB, tree = tree,
+            docFolders = listOf(DocFolder(trees.rootId(tree), label)), revision = it.revision + 1) }
+        listUsbFolder(index)
+    }
+
+    private fun listUsbFolder(index: Int, completionStatus: String? = null) {
+        val pane = panes[index]
+        val tree = pane.tree ?: return
+        if (pane.source != Source.USB) return
+        val folder = pane.docFolders.last()
+        val revision = pane.revision + 1
+        update(index) { it.copy(revision = revision, busy = true, entries = emptyList(),
+            cursor = null, status = "Reading drive…") }
+        local.execute {
+            val result = runCatching {
+                trees.list(tree, folder.id).map { CommanderItem(it.id, it.name, it.folder, it.size, it.modified) }
+                    .sortedWith(compareBy<CommanderItem> { !it.directory }.thenBy { it.name.lowercase() })
+            }
+            runOnUiThread {
+                if (!isDestroyed && panes[index].revision == revision && panes[index].source == Source.USB) {
+                    update(index) { it.copy(entries = result.getOrNull() ?: emptyList(), busy = false,
+                        status = result.fold({ entries -> completionStatus ?: if (entries.isEmpty()) "Folder is empty."
+                            else "${entries.size} items" }, { "Cannot read the drive: ${it.message}" })) }
+                }
+            }
+        }
     }
 
     private fun refreshVisiblePanes() {
@@ -544,6 +695,7 @@ class MainActivity : ComponentActivity() {
                 Source.DEVICES -> Unit
                 Source.PHONE -> listPhoneFolder(index)
                 Source.DRIVE -> listDriveFolder(index)
+                Source.USB -> listUsbFolder(index)
                 Source.MTP -> if (pane.storage != null) listMtpFolder(index)
                     else pane.deviceName?.let { name ->
                         devices.firstOrNull { it.deviceName == name }?.let { device ->
@@ -679,10 +831,19 @@ class MainActivity : ComponentActivity() {
 
     private fun toggleMode(toggled: CommanderMode) {
         val next = if (mode == toggled) CommanderMode.NONE else toggled
-        if (mode == CommanderMode.DELETE) trash = emptyList()
-        // While searching, the results come from searchPane and the other pane is the copy or trash target.
-        if (next == CommanderMode.DELETE) trashPane = if (searchOn) 1 - searchPane else 1 - activePane
+        basket = emptyList()
+        // While searching, the results come from searchPane and the basket takes the search box's place.
+        if (next != CommanderMode.NONE) basketPane = if (searchOn) 1 - searchPane else 1 - activePane
         mode = next
+    }
+
+    /** The copy destination: the browsing pane, or while searching the pane hidden behind the basket. */
+    private fun copyTarget() = if (searchOn) basketPane else 1 - basketPane
+
+    private fun executeLabel(): String {
+        val count = "${basket.size} ITEM${if (basket.size == 1) "" else "S"}"
+        return if (mode == CommanderMode.DELETE) "DELETE $count"
+        else "COPY $count TO ${paneData(copyTarget(), panes[copyTarget()]).path.last().label}"
     }
 
     private fun toggleSearch() {
@@ -698,9 +859,8 @@ class MainActivity : ComponentActivity() {
         if (!writablePane(root) || root.source == Source.PHONE && !phoneAccess()) {
             update(activePane) { it.copy(status = "Open a folder to search in first.") }; return
         }
-        if (mode == CommanderMode.DELETE && trashPane == activePane) trash = emptyList()
         searchPane = activePane
-        trashPane = 1 - searchPane
+        basketPane = 1 - searchPane
         searchRoot = root
         searchRootLabel = paneData(activePane, root).path.joinToString(" / ") { it.label }
         searchHits = emptyList()
@@ -708,19 +868,16 @@ class MainActivity : ComponentActivity() {
         searchOn = true
     }
 
-    private fun dropSearchHit(id: String) {
+    private fun pickSearchHit(id: String) {
         val result = searchHits.firstOrNull { it.hit.item.id == id } ?: return
         val root = searchRoot ?: return
         val source = when (root.source) {
             Source.PHONE -> root.copy(phoneFolders = result.phoneFolders)
             Source.DRIVE -> root.copy(driveFolders = result.driveFolders)
+            Source.USB -> root.copy(docFolders = result.docFolders)
             else -> root.copy(folders = result.folders)
         }
-        when (mode) {
-            CommanderMode.COPY -> startCopy(searchPane, listOf(result.hit.item), source)
-            CommanderMode.DELETE -> addToTrash(searchPane, listOf(result.hit.item), source)
-            CommanderMode.NONE -> Unit
-        }
+        if (mode != CommanderMode.NONE) pick(searchPane, listOf(result.hit.item), source)
     }
 
     private fun startSearch() {
@@ -737,7 +894,7 @@ class MainActivity : ComponentActivity() {
         searchHits = emptyList()
         searchBusy = true
         searchStatus = "Searching…"
-        (if (root.source == Source.DRIVE) network else worker).execute {
+        when (root.source) { Source.DRIVE -> network; Source.USB -> local; else -> worker }.execute {
             val found = mutableListOf<SearchResult>()
             var scanned = 0
             fun cancelled() = generation != searchGeneration
@@ -788,6 +945,21 @@ class MainActivity : ComponentActivity() {
                         }
                     }
                     walk(root.driveFolders)
+                } else if (root.source == Source.USB) {
+                    val tree = root.tree!!
+                    fun walk(folders: List<DocFolder>) {
+                        for (entry in trees.list(tree, folders.last().id).sortedBy { it.name.lowercase() }) {
+                            if (cancelled()) return
+                            scanned++
+                            if (matcher(entry.name)) found += SearchResult(SearchHit(
+                                CommanderItem(entry.id, entry.name, entry.folder, entry.size, entry.modified),
+                                folders.drop(root.docFolders.size).joinToString("/") { it.name }),
+                                emptyList(), emptyList(), docFolders = folders)
+                            if (entry.folder) walk(folders + DocFolder(entry.id, entry.name))
+                            if (scanned % 100 == 0) publish(false)
+                        }
+                    }
+                    walk(root.docFolders)
                 } else {
                     val name = root.deviceName!!
                     val storageId = root.storage!!.id
@@ -817,25 +989,29 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun writablePane(pane: PaneState) = !pane.busy &&
-        (pane.source == Source.PHONE || pane.source == Source.DRIVE || pane.source == Source.MTP && pane.storage != null)
+        (pane.source == Source.PHONE && pane.phoneFolders.isNotEmpty() || pane.source == Source.USB || pane.source == Source.DRIVE || pane.source == Source.MTP && pane.storage != null)
 
-    private fun addToTrash(sourceIndex: Int, items: List<CommanderItem>, source: PaneState = panes[sourceIndex]) {
+    /** Adds [items] to the basket, or takes them out again when all of them are in it already. */
+    private fun pick(sourceIndex: Int, items: List<CommanderItem>, source: PaneState = panes[sourceIndex]) {
+        if (items.isEmpty()) return
         if (!writablePane(source)) {
-            update(sourceIndex) { it.copy(status = "Open a folder before dragging items to the trash.") }; return
+            update(sourceIndex) { it.copy(status = "Open a folder before picking items.") }; return
         }
         if (source.source == Source.PHONE && !phoneAccess()) {
-            update(sourceIndex) { it.copy(status = "Grant all-files access before modifying phone storage.") }; return
+            update(sourceIndex) { it.copy(status = "Grant all-files access before using phone storage.") }; return
         }
         val epoch = source.deviceName?.let { epochs[it] }
-        val added = items.map { TrashEntry(source, it, epoch) }.filter { entry -> trash.none { it.key == entry.key } }
-        trash = trash + added
+        val picked = items.map { BasketEntry(source, it, epoch) }
+        val keys = basket.mapTo(mutableSetOf()) { it.key }
+        basket = if (picked.all { it.key in keys }) basket.filter { entry -> picked.none { it.key == entry.key } }
+            else basket + picked.filter { it.key !in keys }
     }
 
     private fun deleteTrash() {
-        val entries = trash
-        val sourceIndex = 1 - trashPane
+        val entries = basket
+        val sourceIndex = 1 - basketPane
         if (entries.isEmpty() || panes[sourceIndex].busy) return
-        trash = emptyList()
+        basket = emptyList()
         update(sourceIndex) { it.copy(busy = true, status = "Deleting ${entries.size} item(s)…") }
         worker.execute {
             var done = 0
@@ -857,13 +1033,14 @@ class MainActivity : ComponentActivity() {
             runOnUiThread {
                 if (isDestroyed) return@runOnUiThread
                 // Keep what was not deleted so it can be retried.
-                if (mode == CommanderMode.DELETE) trash = entries.drop(done) + trash
+                if (mode == CommanderMode.DELETE) basket = entries.drop(done) + basket
                 // Drop results that were deleted, including everything inside deleted folders.
                 val deleted = entries.take(done).map { it.item.id }.toSet()
                 searchHits = searchHits.filterNot { result -> result.hit.item.id in deleted ||
                     deleted.any { result.hit.item.id.startsWith("$it/") } ||
                     result.folders.any { it.handle.toString() in deleted } ||
-                    result.driveFolders.any { it.id in deleted } }
+                    result.driveFolders.any { it.id in deleted } ||
+                    result.docFolders.any { it.id in deleted } }
                 val progress = "$done/${entries.size} deleted"
                 driveFailure?.let { failure = "${driveError(it)} (${entries[done].item.name})" }
                 finishPaneAction(sourceIndex, null, failure?.let { "Stopped: $it · $progress" } ?: progress)
@@ -871,23 +1048,21 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun startCopy(sourceIndex: Int, items: List<CommanderItem>, source: PaneState = panes[sourceIndex]) {
-        val targetIndex = 1 - sourceIndex
+    /** Copies everything in the basket into the folder open in the copy target pane. */
+    private fun copyBasket() {
+        val entries = basket
+        val targetIndex = copyTarget()
         val destination = panes[targetIndex]
-        if (!writablePane(source) || !writablePane(destination)) {
-            update(sourceIndex) { it.copy(status = "Open a folder in each pane before copying.") }; return
+        if (entries.isEmpty()) return
+        if (!writablePane(destination)) {
+            update(targetIndex) { it.copy(status = "Open the folder to copy into first.") }; return
         }
-        if ((source.source == Source.PHONE || destination.source == Source.PHONE) && !phoneAccess()) {
-            update(sourceIndex) { it.copy(status = "Grant all-files access to copy to or from the phone.") }; return
+        if ((destination.source == Source.PHONE || entries.any { it.pane.source == Source.PHONE }) && !phoneAccess()) {
+            update(targetIndex) { it.copy(status = "Grant all-files access to copy to or from the phone.") }; return
         }
-        if (source.source == Source.MTP && destination.source == Source.MTP) {
-            update(sourceIndex) { it.copy(status = "Direct MTP-to-MTP copy is unavailable; copy to phone first.") }; return
-        }
-        if (items.isEmpty()) return
         val destinationLabel = paneData(targetIndex, destination).path.last().label
-        val sourceEpoch = source.deviceName?.let { epochs[it] }
         val targetEpoch = destination.deviceName?.let { epochs[it] }
-        update(sourceIndex) { it.copy(busy = true, status = "Copy in progress…") }
+        basket = emptyList()
         update(targetIndex) { it.copy(busy = true, status = "Copy in progress…") }
         worker.execute {
             var done = 0
@@ -895,35 +1070,36 @@ class MainActivity : ComponentActivity() {
             var failure: String? = null
             var driveFailure: Exception? = null
             var always: Overwrite? = null
-            for ((position, item) in items.withIndex()) {
+            for ((position, entry) in entries.withIndex()) {
+                val source = entry.pane
+                val item = entry.item
                 try {
-                    check(source.deviceName == null || sourceEpoch == epochs[source.deviceName]) { "Source disconnected" }
+                    check(source.deviceName == null || entry.epoch == epochs[source.deviceName]) { "Source disconnected" }
                     check(destination.deviceName == null || targetEpoch == epochs[destination.deviceName]) {
                         "Destination disconnected"
                     }
                     checkCopyable(source, destination, item)
                     if (existsAt(destination, item.name)) {
                         val choice = always ?: askOverwrite(item, destination, destinationLabel,
-                            more = position < items.size - 1).let { (choice, all) -> if (all) always = choice; choice }
+                            more = position < entries.size - 1).let { (choice, all) -> if (all) always = choice; choice }
                         if (choice == Overwrite.SKIP) { skipped++; continue }
                         if (choice == Overwrite.STOP) { failure = "${item.name} already exists"; break }
                         removeAt(destination, item.name)
                     }
                     var lastReport = 0L
                     var stage = "Copying"
-                    val position = if (items.size > 1) " (${done + 1}/${items.size})" else ""
+                    val counter = if (entries.size > 1) " (${position + 1}/${entries.size})" else ""
                     copyEntry(source, destination, item, onStage = { stage = it; lastReport = 0 }) { copied, total ->
                         val now = System.currentTimeMillis()
                         if (copied == total || now - lastReport >= 200) {
                             lastReport = now
                             val fraction = if (total > 0) copied.toFloat() / total else null
-                            val status = "$stage ${item.name}$position: ${Formatter.formatShortFileSize(this, copied)}" +
+                            val status = "$stage ${item.name}$counter: ${Formatter.formatShortFileSize(this, copied)}" +
                                 " / ${Formatter.formatShortFileSize(this, total)}" +
                                 (fraction?.let { " · ${(it * 100).toInt()}%" } ?: "")
                             runOnUiThread {
-                                if (!isDestroyed) listOf(sourceIndex, targetIndex).forEach { index ->
-                                    if (panes[index].busy) update(index) { it.copy(status = status, progress = fraction) }
-                                }
+                                if (!isDestroyed && panes[targetIndex].busy)
+                                    update(targetIndex) { it.copy(status = status, progress = fraction) }
                             }
                         }
                     }
@@ -937,9 +1113,11 @@ class MainActivity : ComponentActivity() {
             destination.deviceName?.let(::endRawSession)
             runOnUiThread {
                 if (isDestroyed) return@runOnUiThread
-                val progress = "$done/${items.size} copied" + if (skipped > 0) ", $skipped skipped" else ""
-                driveFailure?.let { failure = "${driveError(it)} (${items[done + skipped].name})" }
-                finishPaneAction(sourceIndex, targetIndex, failure?.let { "Stopped: $it · $progress" } ?: progress)
+                // Keep what was not copied so it can be retried.
+                if (mode == CommanderMode.COPY) basket = entries.drop(done + skipped) + basket
+                val progress = "$done/${entries.size} copied" + if (skipped > 0) ", $skipped skipped" else ""
+                driveFailure?.let { failure = "${driveError(it)} (${entries[done + skipped].item.name})" }
+                finishPaneAction(targetIndex, null, failure?.let { "Stopped: $it · $progress" } ?: progress)
             }
         }
     }
@@ -958,6 +1136,9 @@ class MainActivity : ComponentActivity() {
 
     /** Rejects copies that cannot work before anything existing at the destination is replaced. */
     private fun checkCopyable(source: PaneState, destination: PaneState, item: CommanderItem) {
+        check(source.source != Source.MTP || destination.source != Source.MTP) {
+            "Direct MTP-to-MTP copy is unavailable; copy to phone first"
+        }
         if (item.directory) {
             check(source.source != Source.MTP && destination.source != Source.MTP) {
                 "MTP folder copy is not supported; select files individually"
@@ -975,6 +1156,7 @@ class MainActivity : ComponentActivity() {
         Source.PHONE -> File(target.phoneFolders.last(), name).exists()
         Source.MTP -> mtpExists(target, name)
         Source.DRIVE -> drive.exists(target.driveFolders.last().id, name)
+        Source.USB -> trees.find(target.tree!!, target.docFolders.last().id, name).isNotEmpty()
         Source.DEVICES -> false
     }
 
@@ -993,6 +1175,8 @@ class MainActivity : ComponentActivity() {
                 rawSessions[deviceName]?.forget(target.storage.id, parent, name)
             }
             Source.DRIVE -> drive.find(target.driveFolders.last().id, name).forEach { drive.trash(it.id) }
+            Source.USB -> trees.find(target.tree!!, target.docFolders.last().id, name)
+                .forEach { trees.delete(target.tree, it.id) }
             Source.DEVICES -> Unit
         }
     }
@@ -1009,6 +1193,7 @@ class MainActivity : ComponentActivity() {
                 Source.PHONE -> listPhoneFolder(index, status)
                 Source.MTP -> if (panes[index].storage != null) listMtpFolder(index, status)
                 Source.DRIVE -> listDriveFolder(index, status)
+                Source.USB -> listUsbFolder(index, status)
                 Source.DEVICES -> {}
             }
         }
@@ -1114,6 +1299,8 @@ class MainActivity : ComponentActivity() {
             remove(phoneItem(pane, item))
         } else if (pane.source == Source.DRIVE) {
             drive.trash(item.id)
+        } else if (pane.source == Source.USB) {
+            trees.delete(pane.tree!!, item.id)
         } else {
             val info = mtpInfo(pane, item)
             val session = mtpSession(pane)
@@ -1131,10 +1318,12 @@ class MainActivity : ComponentActivity() {
     /** [onStage] names the current step when a copy has to pass through a temporary file. */
     private fun copyEntry(source: PaneState, target: PaneState, item: CommanderItem,
         onStage: (String) -> Unit = {}, onProgress: (Long, Long) -> Unit = { _, _ -> }) {
-        check(source.source != target.source || source.source != Source.PHONE ||
-            source.phoneFolders.last() != target.phoneFolders.last()) { "Source and destination are the same folder" }
-        check(source.source != target.source || source.source != Source.DRIVE ||
-            source.driveFolders.last() != target.driveFolders.last()) { "Source and destination are the same folder" }
+        check(source.source != target.source || when (source.source) {
+            Source.PHONE -> source.phoneFolders.last() != target.phoneFolders.last()
+            Source.DRIVE -> source.driveFolders.last() != target.driveFolders.last()
+            Source.USB -> source.tree != target.tree || source.docFolders.last() != target.docFolders.last()
+            else -> true
+        }) { "Source and destination are the same folder" }
         when {
             source.source == Source.PHONE && target.source == Source.PHONE -> {
                 check(phoneAccess()) { "Phone access revoked" }
@@ -1142,18 +1331,11 @@ class MainActivity : ComponentActivity() {
             }
             target.source == Source.PHONE -> {
                 check(phoneAccess()) { "Phone access revoked" }
-                val output = phoneChild(target, item.name)
-                if (source.source == Source.DRIVE) downloadDrive(driveFile(item), output, onProgress)
-                else downloadMtp(source, item, output, onProgress)
+                fetch(source, item, phoneChild(target, item.name), onProgress)
             }
             source.source == Source.PHONE -> {
                 check(phoneAccess()) { "Phone access revoked" }
-                val file = phoneItem(source, item)
-                if (target.source == Source.DRIVE) uploadDrive(target, file, onProgress)
-                else {
-                    check(file.isFile) { "MTP folder copy is not supported; select files individually" }
-                    uploadMtp(target, file, onProgress)
-                }
+                put(target, phoneItem(source, item), onProgress)
             }
             source.source == Source.DRIVE && target.source == Source.DRIVE -> {
                 val file = driveFile(item)
@@ -1163,28 +1345,46 @@ class MainActivity : ComponentActivity() {
                 drive.copy(file.id, folderId, file.name)
             }
             else -> {
-                // Between the watch and Drive the file passes through a temporary copy under the item's own name,
+                // Elsewhere the item passes through a temporary copy under its own name,
                 // which the raw Garmin upload uses as the destination name.
                 check(validName(item.name)) { "Invalid filename" }
                 val staging = File(cacheDir, "transfer").apply { deleteRecursively(); mkdirs() }
                 val temp = File(staging, item.name)
                 try {
-                    if (source.source == Source.DRIVE) {
-                        val file = driveFile(item)
-                        check(!file.folder) { "MTP folder copy is not supported; select files individually" }
-                        onStage("Step 1/2, downloading")
-                        downloadDrive(file, temp, onProgress)
-                        onStage("Step 2/2, copying to device")
-                        uploadMtp(target, temp, onProgress)
-                    } else {
-                        check(!drive.exists(target.driveFolders.last().id, item.name)) { "Destination already exists" }
-                        onStage("Step 1/2, reading from device")
-                        downloadMtp(source, item, temp, onProgress)
-                        onStage("Step 2/2, uploading")
-                        uploadDrive(target, temp, onProgress)
-                    }
+                    onStage("Step 1/2, reading")
+                    fetch(source, item, temp, onProgress)
+                    onStage("Step 2/2, writing")
+                    put(target, temp, onProgress)
                 } finally { staging.deleteRecursively() }
             }
+        }
+    }
+
+    /** Copies [item] from a pane other than the phone to the new local [to]. */
+    private fun fetch(source: PaneState, item: CommanderItem, to: File, onProgress: (Long, Long) -> Unit) {
+        when (source.source) {
+            Source.DRIVE -> downloadDrive(driveFile(item), to, onProgress)
+            Source.MTP -> downloadMtp(source, item, to, onProgress)
+            Source.USB -> trees.download(source.tree!!,
+                DocEntry(item.id, item.name, item.directory, item.size, item.modified), to, onProgress)
+            else -> error("Cannot copy from here")
+        }
+    }
+
+    /** Copies the local [file] under its own name into a pane other than the phone. */
+    private fun put(target: PaneState, file: File, onProgress: (Long, Long) -> Unit) {
+        when (target.source) {
+            Source.DRIVE -> uploadDrive(target, file, onProgress)
+            Source.MTP -> {
+                check(file.isFile) { "MTP folder copy is not supported; select files individually" }
+                uploadMtp(target, file, onProgress)
+            }
+            Source.USB -> {
+                val parentId = target.docFolders.last().id
+                check(trees.find(target.tree!!, parentId, file.name).isEmpty()) { "Destination already exists" }
+                trees.upload(target.tree, parentId, file, onProgress)
+            }
+            else -> error("Cannot copy to here")
         }
     }
 
@@ -1329,6 +1529,7 @@ class MainActivity : ComponentActivity() {
         }
         worker.shutdown()
         network.shutdownNow()
+        local.shutdownNow()
         super.onDestroy()
     }
 }

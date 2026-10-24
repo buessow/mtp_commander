@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Dark window background while the app starts, matching the dark palette. -->
+    <style name="Theme.AndroidMTP" parent="android:Theme.Material.NoActionBar" />
+</resources>
