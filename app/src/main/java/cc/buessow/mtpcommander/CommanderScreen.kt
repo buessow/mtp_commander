@@ -100,6 +100,9 @@ internal data class SearchHit(val item: CommanderItem, val folder: String)
 internal data class SearchState(val active: Boolean, val target: Int, val root: String, val query: String,
     val hits: List<SearchHit>, val busy: Boolean, val status: String)
 
+/** While [active], the upper pane takes the name of a folder to create in pane [target], shown below. */
+internal data class NewFolderState(val active: Boolean, val target: Int, val name: String, val location: String)
+
 /** Screen colours; [onActive] and [onAccent] are for text on the active and accent backgrounds. */
 private class Palette(val paper: Color, val ink: Color, val muted: Color, val divider: Color, val accent: Color,
     val active: Color, val onActive: Color, val onActiveDetail: Color, val onAccent: Color,
@@ -146,12 +149,13 @@ internal fun CommanderScreen(
     onDismissPhoneAccess: () -> Unit, mode: CommanderMode, onMode: (CommanderMode) -> Unit,
     basketPane: Int, basket: List<CommanderItem>, picked: Set<String>,
     onPick: (Int, List<CommanderItem>) -> Unit, onUnpick: (String) -> Unit,
-    onExecute: () -> Unit, onClear: () -> Unit, executeLabel: String,
+    onExecute: () -> Unit, onClear: () -> Unit, executeLabel: String, basketBusy: Boolean,
     search: SearchState, onSearchToggle: () -> Unit, onSearchQuery: (String) -> Unit, onSearch: () -> Unit,
-    onPickHit: (String) -> Unit, onCursor: (Int, String) -> Unit
+    onPickHit: (String) -> Unit, newFolder: NewFolderState, onNewFolderToggle: () -> Unit,
+    onNewFolderName: (String) -> Unit, onCreateFolder: () -> Unit, onCursor: (Int, String) -> Unit
 ) {
     val density = LocalDensity.current
-    val buttonBounds = remember { mutableStateListOf(Rect.Zero, Rect.Zero, Rect.Zero) }
+    val buttonBounds = remember { mutableStateListOf(Rect.Zero, Rect.Zero, Rect.Zero, Rect.Zero) }
     val context = LocalContext.current
     // Each instruction balloon is shown once after install; the preference records which ones were seen.
     val hints = remember { context.getSharedPreferences("hints", android.content.Context.MODE_PRIVATE) }
@@ -159,7 +163,7 @@ internal fun CommanderScreen(
         mode == CommanderMode.NONE -> null
         search.active && mode == CommanderMode.COPY -> "search-copy-2"
         search.active -> "search-delete-2"
-        mode == CommanderMode.COPY -> "copy-3"
+        mode == CommanderMode.COPY -> "copy-4"
         else -> "delete-3"
     }
     var balloonHidden by remember(balloon) { mutableStateOf(balloon == null || hints.getBoolean(balloon, false)) }
@@ -191,13 +195,16 @@ internal fun CommanderScreen(
                 fontSize = 22.sp, color = accent)
         }
         Row(Modifier.fillMaxWidth().border(BorderStroke(0.5.dp, divider))) {
-            listOf(Triple("Copy", "▣", CommanderMode.COPY), Triple("Delete", "×", CommanderMode.DELETE),
-                Triple("Search", "⌕", null)).forEachIndexed { index, (label, icon, toggle) ->
-                val on = if (toggle == null) search.active else mode == toggle
+            listOf(
+                ToolButton("Copy", "▣", mode == CommanderMode.COPY) { onMode(CommanderMode.COPY) },
+                ToolButton("Delete", "×", mode == CommanderMode.DELETE) { onMode(CommanderMode.DELETE) },
+                ToolButton("Search", "⌕", search.active, onSearchToggle),
+                ToolButton("New folder", "+", newFolder.active, onNewFolderToggle)
+            ).forEachIndexed { index, (label, icon, on, onClick) ->
                 Column(Modifier.weight(1f).height(56.dp)
                     .onGloballyPositioned { buttonBounds[index] = it.boundsInRoot() }
                     .background(if (on) active else paper)
-                    .clickable { if (toggle == null) onSearchToggle() else onMode(toggle) }
+                    .clickable(onClick = onClick)
                     .border(BorderStroke(0.5.dp, divider)),
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.Center) {
@@ -211,16 +218,18 @@ internal fun CommanderScreen(
             if (slot == 1) Spacer(Modifier.fillMaxWidth().height(1.dp).background(divider))
             val paneModifier = Modifier.weight(1f)
             // Index of the folder pane shown in this slot; while searching only the copy target is shown.
-            val index = if (search.active) search.target else slot
+            val index = if (newFolder.active) newFolder.target else if (search.active) search.target else slot
             val pane = panes[index]
-            if (search.active && slot == 1) SearchResults(search, picked,
+            if (newFolder.active && slot == 0)
+                NewFolderInput(newFolder, onNewFolderName, onCreateFolder, modifier = paneModifier)
+            else if (search.active && slot == 1) SearchResults(search, picked,
                 pickEnabled = mode != CommanderMode.NONE,
                 onPick = { id -> balloonHidden = true; onPickHit(id) }, modifier = paneModifier)
             else if (search.active && mode == CommanderMode.NONE)
                 SearchInput(search, onSearchQuery, onSearch, modifier = paneModifier)
             else if (mode != CommanderMode.NONE && slot == basketSlot)
                 Basket(copy = mode == CommanderMode.COPY, basket, onRemove = onUnpick, onExecute = onExecute,
-                    onClear = onClear, executeLabel = executeLabel, modifier = paneModifier)
+                    onClear = onClear, executeLabel = executeLabel, busy = basketBusy, modifier = paneModifier)
             else key(index, pane.navigationKey) {
                 Pane(
                     listState = listStates.getOrPut(pane.navigationKey) { LazyListState() },
@@ -250,9 +259,9 @@ internal fun CommanderScreen(
                 "out. The COPY button copies them into the folder named on it."
             "search-delete-2" -> "Tap search results to add them to the trash above; tap again to take them out. " +
                 "Nothing is deleted until you press DELETE."
-            "copy-3" -> "Tap files to add them to the copy list, tap again to take them out. Hold to add everything " +
-                "in the folder; tap a folder's ▱ to add the folder itself. Then open the folder to copy into and " +
-                "press COPY."
+            "copy-4" -> "Tap files to add them to the copy list, tap again to take them out. Hold to add everything " +
+                "in the folder; tap a folder's ▱ to add the folder itself. COPY copies them into the folder that " +
+                "was open where the list is now."
             else -> "Tap files to add them to the trash, tap again to take them out. Hold to add everything in the " +
                 "folder; tap a folder's ▱ to add the folder itself. Nothing is deleted until you press DELETE."
         }
@@ -306,6 +315,28 @@ private fun SearchInput(search: SearchState, onQuery: (String) -> Unit, onSearch
 }
 
 @Composable
+private fun NewFolderInput(state: NewFolderState, onName: (String) -> Unit, onCreate: () -> Unit, modifier: Modifier) {
+    val focus = remember { FocusRequester() }
+    LaunchedEffect(Unit) { focus.requestFocus() }
+    Column(modifier.background(paper)) {
+        PanelHeader("+", "NEW FOLDER", state.location)
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            OutlinedTextField(state.name, onName, Modifier.fillMaxWidth().focusRequester(focus),
+                singleLine = true, placeholder = { Text("Folder name") },
+                trailingIcon = { TextButton(onClick = onCreate) { Text("CREATE", color = accent, fontWeight = FontWeight.Bold) } },
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done, autoCorrectEnabled = false,
+                    capitalization = KeyboardCapitalization.None),
+                keyboardActions = KeyboardActions(onDone = { onCreate() }),
+                colors = OutlinedTextFieldDefaults.colors(focusedTextColor = ink, unfocusedTextColor = ink,
+                    focusedBorderColor = accent, unfocusedBorderColor = muted, cursorColor = accent,
+                    focusedPlaceholderColor = muted, unfocusedPlaceholderColor = muted))
+            Text("The folder is created in the folder open below. Open another one there to create it elsewhere.",
+                color = muted, fontSize = 12.sp)
+        }
+    }
+}
+
+@Composable
 private fun SearchResults(search: SearchState, picked: Set<String>, pickEnabled: Boolean,
     onPick: (String) -> Unit, modifier: Modifier) {
     Column(modifier.background(paper)) {
@@ -337,6 +368,8 @@ private fun SearchResults(search: SearchState, picked: Set<String>, pickEnabled:
     }
 }
 
+private data class ToolButton(val label: String, val icon: String, val on: Boolean, val onClick: () -> Unit)
+
 @Composable
 private fun PanelHeader(symbol: String, title: String, detail: String) {
     Row(Modifier.fillMaxWidth().height(37.dp).background(active).padding(horizontal = 10.dp),
@@ -353,7 +386,9 @@ private fun PanelHeader(symbol: String, title: String, detail: String) {
 /** The copy list or the trash: what was picked, with buttons to empty it and to copy or delete it all. */
 @Composable
 private fun Basket(copy: Boolean, entries: List<CommanderItem>, onRemove: (String) -> Unit, onExecute: () -> Unit,
-    onClear: () -> Unit, executeLabel: String, modifier: Modifier) {
+    onClear: () -> Unit, executeLabel: String, busy: Boolean, modifier: Modifier) {
+    // While copying, entries leave the list one by one as they are done; it cannot be changed meanwhile.
+    val enabled = entries.isNotEmpty() && !busy
     val header = if (copy) active else accent
     val onHeader = if (copy) onActive else onAccent
     Column(modifier.background(paper)) {
@@ -368,29 +403,30 @@ private fun Basket(copy: Boolean, entries: List<CommanderItem>, onRemove: (Strin
         }
         LazyColumn(Modifier.weight(1f)) {
             items(entries, key = { it.id }) { item ->
-                Row(Modifier.fillMaxWidth().height(40.dp).clickable { onRemove(item.id) }
+                Row(Modifier.fillMaxWidth().height(40.dp).clickable(enabled = !busy) { onRemove(item.id) }
                     .padding(horizontal = 10.dp), verticalAlignment = Alignment.CenterVertically) {
                     ItemIcon(item, picked = false)
                     Spacer(Modifier.width(6.dp))
                     Text(item.name, Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis,
                         fontSize = 13.sp, color = ink)
-                    Text("✕", color = muted, fontSize = 14.sp)
+                    if (!busy) Text("✕", color = muted, fontSize = 14.sp)
                 }
                 Spacer(Modifier.fillMaxWidth().height(0.5.dp).background(divider.copy(alpha = 0.5f)))
             }
             if (entries.isEmpty()) item {
-                Text(if (copy) "Tap files in the other pane to add them here, then open the folder to copy into " +
-                    "and press COPY." else "Tap files in the other pane to add them here. They are only deleted " +
+                Text(if (copy) "Tap files in the other pane to add them here. The button below copies them into " +
+                    "the folder this pane showed before." else "Tap files in the other pane to add them here. They are only deleted " +
                     "when you press DELETE.", Modifier.padding(18.dp), color = muted, fontSize = 12.sp)
             }
         }
         Row(Modifier.fillMaxWidth().height(44.dp)) {
             Text("CLEAR", Modifier.width(96.dp).fillMaxSize().border(BorderStroke(0.5.dp, divider))
-                .clickable(enabled = entries.isNotEmpty(), onClick = onClear).padding(vertical = 13.dp),
-                color = if (entries.isEmpty()) muted else ink, fontSize = 13.sp, fontWeight = FontWeight.Bold,
+                .clickable(enabled = enabled, onClick = onClear).padding(vertical = 13.dp),
+                color = if (enabled) ink else muted, fontSize = 13.sp, fontWeight = FontWeight.Bold,
                 letterSpacing = 0.8.sp, textAlign = TextAlign.Center)
-            Text(executeLabel, Modifier.weight(1f).fillMaxSize().background(if (entries.isEmpty()) divider else header)
-                .clickable(enabled = entries.isNotEmpty(), onClick = onExecute)
+            Text(if (busy && entries.isNotEmpty()) "${if (copy) "COPYING" else "DELETING"}…" else executeLabel,
+                Modifier.weight(1f).fillMaxSize().background(if (enabled) header else divider)
+                .clickable(enabled = enabled, onClick = onExecute)
                 .padding(horizontal = 10.dp, vertical = 13.dp),
                 color = onHeader, fontSize = 13.sp, fontWeight = FontWeight.Bold, letterSpacing = 0.8.sp,
                 textAlign = TextAlign.Center, maxLines = 1, overflow = TextOverflow.Ellipsis)

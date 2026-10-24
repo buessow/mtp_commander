@@ -129,7 +129,8 @@ internal object RawMtpUploader {
             var handle = -1
             for (wideSize in listOf(false, true)) {
                 val response = transport.commandWithData(SEND_OBJECT_INFO, transaction++,
-                    objectInfo(storageId, parent, file.name, size, wideSize), storageId, parent)
+                    objectInfo(storageId, parent, file.name, size, wideSize, MtpConstants.FORMAT_UNDEFINED),
+                    storageId, parent)
                 if (response.code == OK) {
                     handle = response.parameters.getOrNull(2) ?: error("MTP did not return a new file handle")
                     break
@@ -146,6 +147,16 @@ internal object RawMtpUploader {
             existing += file.name
             Log.i("AndroidMTP", "Raw MTP uploaded ${file.name} ($size bytes) in ${elapsed()}")
             return handle
+        }
+
+        /** Creates an empty folder and returns its handle. */
+        fun createFolder(storageId: Int, parent: Int, name: String): Int {
+            val response = transport.commandWithData(SEND_OBJECT_INFO, transaction++,
+                objectInfo(storageId, parent, name, 0, false, MtpConstants.FORMAT_ASSOCIATION), storageId, parent)
+            check(response.code == OK) { "MTP SendObjectInfo returned ${response.code.hex()}" }
+            names[storageId to parent]?.add(name)
+            Log.i("AndroidMTP", "Raw MTP created folder $name")
+            return response.parameters.getOrNull(2) ?: error("MTP did not return a new folder handle")
         }
 
         /** Forgets [name] after it was deleted through another session, so it can be uploaded again. */
@@ -192,18 +203,19 @@ internal object RawMtpUploader {
     }
 
     private fun objectInfo(storageId: Int, parent: Int, name: String, size: Long,
-        wideSize: Boolean): ByteArray {
+        wideSize: Boolean, format: Int): ByteArray {
         val nameBytes = mtpString(name)
         val data = ByteBuffer.allocate(52 + (if (wideSize) 4 else 0) + nameBytes.size + 3)
             .order(ByteOrder.LITTLE_ENDIAN)
         data.putInt(storageId)
-        data.putShort(MtpConstants.FORMAT_UNDEFINED.toShort())
+        data.putShort(format.toShort())
         data.putShort(0)
         if (wideSize) data.putLong(size) else data.putInt(size.toInt())
         data.putShort(0)
         repeat(6) { data.putInt(0) }
         data.putInt(parent)
-        data.putShort(0)
+        // Association type 1 is a generic folder.
+        data.putShort(if (format == MtpConstants.FORMAT_ASSOCIATION) 1 else 0)
         data.putInt(0)
         data.putInt(0)
         data.put(nameBytes)

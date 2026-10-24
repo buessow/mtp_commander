@@ -84,6 +84,11 @@ internal class DocumentTrees(private val resolver: ContentResolver) {
         } catch (e: Exception) { runCatching { DocumentsContract.deleteDocument(resolver, created) }; throw e }
     }
 
+    fun createFolder(tree: Uri, parentId: String, name: String) {
+        DocumentsContract.createDocument(resolver, uri(tree, parentId), Document.MIME_TYPE_DIR, name)
+            ?: error("Could not create $name")
+    }
+
     /** Reads a small document completely, up to [limit] bytes. */
     fun read(tree: Uri, id: String, limit: Int): ByteArray =
         (resolver.openInputStream(uri(tree, id)) ?: error("Cannot read document")).use { input ->

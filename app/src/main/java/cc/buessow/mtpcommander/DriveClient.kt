@@ -2,6 +2,7 @@ package cc.buessow.mtpcommander
 
 import android.app.PendingIntent
 import android.content.Context
+import com.google.android.gms.auth.GoogleAuthUtil
 import com.google.android.gms.auth.api.identity.AuthorizationRequest
 import com.google.android.gms.auth.api.identity.Identity
 import com.google.android.gms.common.api.Scope
@@ -27,15 +28,37 @@ internal data class DriveFile(val id: String, val name: String, val folder: Bool
 internal class DriveAuthorizationRequired(val intent: PendingIntent) :
     Exception("Google Drive access has to be granted")
 
-/** Minimal Drive v3 REST client; every call blocks and must run off the main thread. */
+/**
+ * Minimal Drive v3 REST client; every call blocks and must run off the main thread. Lists, searches and
+ * downloads only see files and folders this app created.
+ */
 internal class DriveClient(private val context: Context) {
     private val request = AuthorizationRequest.builder().setRequestedScopes(listOf(Scope(SCOPE))).build()
 
     // Play services caches the token and refreshes it before it expires.
-    private fun token(): String {
+    private fun token(retry: Boolean = true): String {
         val result = Tasks.await(Identity.getAuthorizationClient(context).authorize(request))
         if (result.hasResolution()) throw DriveAuthorizationRequired(result.pendingIntent!!)
-        return result.accessToken ?: error("Google did not return a Drive access token")
+        val token = result.accessToken ?: error("Google did not return a Drive access token")
+        // Grants add up, so a token from an earlier full Drive grant would still reach every file. Revoking
+        // drops the whole grant; the next call then asks for drive.file alone.
+        if (retry && FULL_SCOPE in result.grantedScopes) {
+            revoke(token)
+            GoogleAuthUtil.clearToken(context, token)
+            return token(retry = false)
+        }
+        return token
+    }
+
+    private fun revoke(token: String) {
+        val connection = URL("https://oauth2.googleapis.com/revoke").openConnection() as HttpURLConnection
+        try {
+            connection.requestMethod = "POST"
+            connection.setRequestProperty("Content-Type", "application/x-www-form-urlencoded")
+            connection.doOutput = true
+            connection.outputStream.use { it.write("token=${encode(token)}".toByteArray()) }
+            checkStatus(connection)
+        } finally { connection.disconnect() }
     }
 
     fun list(folderId: String): List<DriveFile> = query("'${escape(folderId)}' in parents and trashed = false")
@@ -183,7 +206,10 @@ internal class DriveClient(private val context: Context) {
 
     companion object {
         const val ROOT = "root"
-        private const val SCOPE = "https://www.googleapis.com/auth/drive"
+        // drive.file only reaches files this app created, but unlike full Drive access it is not a restricted
+        // scope, so the app needs no Google security assessment.
+        private const val SCOPE = "https://www.googleapis.com/auth/drive.file"
+        private const val FULL_SCOPE = "https://www.googleapis.com/auth/drive"
         private const val FOLDER = "application/vnd.google-apps.folder"
         private const val API = "https://www.googleapis.com/drive/v3"
         private const val UPLOAD = "https://www.googleapis.com/upload/drive/v3"
