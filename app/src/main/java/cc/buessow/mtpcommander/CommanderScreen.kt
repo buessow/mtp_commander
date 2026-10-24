@@ -30,6 +30,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -82,7 +83,7 @@ internal data class CommanderPane(
     val title: String, val path: List<CommanderCrumb>, val entries: List<CommanderItem>,
     val status: String, val busy: Boolean, val canBack: Boolean,
     val actionLabel: String, val navigationKey: String,
-    val cursor: String? = null, val draggable: Boolean = false
+    val cursor: String? = null, val draggable: Boolean = false, val progress: Float? = null
 )
 
 internal enum class CommanderMode { NONE, COPY, DELETE }
@@ -192,7 +193,7 @@ internal fun CommanderScreen(
                 Pane(
                     title = pane.title, symbol = if (index == 0) "▯" else "◉", path = pane.path,
                     entries = pane.entries, isActive = activePane == index, isBusy = pane.busy,
-                    cursor = pane.cursor, onCursor = { onCursor(index, it) },
+                    cursor = pane.cursor, onCursor = { onCursor(index, it) }, progress = pane.progress,
                     emptyMessage = pane.status,
                     actionLabel = pane.actionLabel, onAction = { onAction(index) },
                     onNavigate = { depth -> onActivate(index); onNavigate(index, depth) },
@@ -374,7 +375,7 @@ private fun Trash(entries: List<CommanderItem>, onRemove: (String) -> Unit, onDe
 private fun Pane(
     title: String, symbol: String, path: List<CommanderCrumb>, entries: List<CommanderItem>,
     isActive: Boolean, isBusy: Boolean, emptyMessage: String,
-    cursor: String?, onCursor: (String) -> Unit,
+    cursor: String?, onCursor: (String) -> Unit, progress: Float?,
     actionLabel: String, onAction: () -> Unit, onNavigate: (Int) -> Unit,
     onOpen: (CommanderItem) -> Unit, onActivate: () -> Unit, hint: String, dragEnabled: Boolean,
     onDragStart: (List<CommanderItem>, Offset) -> Unit, onDragBy: (Offset) -> Unit,
@@ -459,6 +460,8 @@ private fun Pane(
                 }
             }
         }
+        if (progress != null) LinearProgressIndicator(progress = { progress },
+            Modifier.fillMaxWidth().height(4.dp), color = accent, trackColor = divider)
         Row(Modifier.fillMaxWidth().height(27.dp).border(BorderStroke(0.5.dp, divider))
             .padding(horizontal = 10.dp), verticalAlignment = Alignment.CenterVertically) {
             Text("${entries.size} items", fontSize = 11.sp, color = muted)

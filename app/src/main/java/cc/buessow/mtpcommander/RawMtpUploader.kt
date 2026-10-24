@@ -8,6 +8,7 @@ import android.hardware.usb.UsbInterface
 import android.hardware.usb.UsbManager
 import android.mtp.MtpConstants
 import android.util.Log
+import java.io.Closeable
 import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -17,7 +18,6 @@ internal object RawMtpUploader {
     private const val COMMAND = 1
     private const val DATA = 2
     private const val RESPONSE = 3
-    private const val GET_DEVICE_INFO = 0x1001
     private const val OPEN_SESSION = 0x1002
     private const val CLOSE_SESSION = 0x1003
     private const val GET_STORAGE_IDS = 0x1004
@@ -34,108 +34,122 @@ internal object RawMtpUploader {
     // The device may only reply to SendObject after committing a large file to flash.
     private const val SEND_OBJECT_TIMEOUT_MS = 180_000
 
-    fun upload(manager: UsbManager, device: UsbDevice, storageId: Int, parent: Int,
-        file: File): Int = upload(manager, device, storageId, emptyList(), parent, file)
+    /**
+     * One raw MTP session. Keep it open for every file of a batch: each reconnect is another chance for
+     * the watch, or Android's MtpDocumentsProvider grabbing it in between, to get confused.
+     */
+    class Session private constructor(private val connection: UsbDeviceConnection,
+        private val usbInterface: UsbInterface, private val owned: Boolean) : Closeable {
+        constructor(manager: UsbManager, device: UsbDevice) : this(
+            manager.openDevice(device) ?: error("Could not open USB device for upload"), device.mtpInterface(), true)
 
-    fun uploadToPath(manager: UsbManager, device: UsbDevice, storageId: Int,
-        folders: List<String>, file: File): Int =
-        upload(manager, device, storageId, folders, -1, file)
-
-    /** Reads the model name from MTP GetDeviceInfo, which needs no session; Garmin USB descriptors lack it. */
-    fun deviceModel(manager: UsbManager, device: UsbDevice): String? {
-        val usbInterface = device.mtpInterface()
-        val connection = manager.openDevice(device) ?: error("Could not open USB device")
-        try {
-            check(connection.claimInterface(usbInterface, true)) { "Could not claim the MTP USB interface" }
-            val transport = Transport(connection, usbInterface.bulkEndpoint(UsbConstants.USB_DIR_IN),
-                usbInterface.bulkEndpoint(UsbConstants.USB_DIR_OUT))
-            transport.drain()
-            return transport.commandForData(GET_DEVICE_INFO, 0).deviceInfoModel()
-        } finally {
-            connection.releaseInterface(usbInterface)
-            connection.close()
+        companion object {
+            /**
+             * Borrows the connection of an open MtpDevice and its MTP session, so the watch is never released.
+             * Android's MtpDocumentsProvider polls the watch every few seconds and grabs it in any gap between
+             * closing one connection and opening the next, leaving it unable to answer our OpenSession.
+             */
+            fun shared(connection: UsbDeviceConnection, device: UsbDevice) =
+                Session(connection, device.mtpInterface(), false)
         }
-    }
 
-    private fun upload(manager: UsbManager, device: UsbDevice, storageId: Int,
-        folders: List<String>, knownParent: Int, file: File): Int {
-        val usbInterface = device.mtpInterface()
-        val input = usbInterface.bulkEndpoint(UsbConstants.USB_DIR_IN)
-        val output = usbInterface.bulkEndpoint(UsbConstants.USB_DIR_OUT)
-        val connection = manager.openDevice(device) ?: error("Could not open USB device for upload")
-        try {
-            check(connection.claimInterface(usbInterface, true)) { "Could not claim the MTP USB interface" }
-            val transport = Transport(connection, input, output)
-            // Android's MtpDocumentsProvider also opens the watch; claiming the interface can interrupt
-            // one of its transactions, and the watch refuses commands until that data has been read.
-            transport.drain()
-            Log.i("AndroidMTP", "Raw MTP OpenSession")
-            val open = try {
-                transport.command(OPEN_SESSION, 0, 1)
-            } catch (firstError: Exception) {
-                Log.w("AndroidMTP", "Raw MTP OpenSession failed; recovering USB transport", firstError)
-                recoverTransport(connection, usbInterface, input, output)
-                transport.drain()
-                transport.command(OPEN_SESSION, 0, 1)
-            }
-            // Like Android's MtpDevice, don't insist on OpenSession: a reply left over from another host's
-            // transaction (e.g. 0x2005) may arrive here, and the device still accepts the following operations.
-            if (open.code != OK && open.code != SESSION_ALREADY_OPEN)
-                Log.w("AndroidMTP", "MTP OpenSession returned ${open.code.hex()}; continuing")
-            var transaction = 1
-            var handle = -1
+        private val transport: Transport
+        // A borrowed session continues after MtpDevice's own transactions; stay clear of its low IDs.
+        private var transaction = if (owned) 1 else 0x10000
+        private var storageIds: Set<Int>? = null
+        // Names in each destination folder, keyed by storage and parent, so each folder is listed only once.
+        private val names = mutableMapOf<Pair<Int, Int>, MutableSet<String>>()
+
+        init {
             try {
-                Log.i("AndroidMTP", "Raw MTP GetStorageIDs")
-                val availableIds = transport.commandForData(GET_STORAGE_IDS, transaction++)
-                    .intArray().toSet()
-                check(storageId in availableIds) { "MTP storage $storageId is unavailable: $availableIds" }
-                var parent = knownParent
-                if (folders.isNotEmpty()) {
-                    parent = -1
-                    for (folderName in folders) {
-                        Log.i("AndroidMTP", "Raw MTP resolve folder $folderName")
-                        val handles = transport.commandForData(GET_OBJECT_HANDLES, transaction++,
-                            storageId, 0, parent).intArray()
-                        parent = handles.firstOrNull { candidate ->
-                            val info = transport.commandForData(GET_OBJECT_INFO, transaction++, candidate)
-                                .objectNameAndFormat()
-                            info.first == folderName && info.second == MtpConstants.FORMAT_ASSOCIATION
-                        } ?: error("MTP folder $folderName is unavailable")
+                if (owned) check(connection.claimInterface(usbInterface, true)) { "Could not claim the MTP USB interface" }
+                val input = usbInterface.bulkEndpoint(UsbConstants.USB_DIR_IN)
+                val output = usbInterface.bulkEndpoint(UsbConstants.USB_DIR_OUT)
+                transport = Transport(connection, input, output)
+                // Android's MtpDocumentsProvider also opens the watch; claiming the interface can interrupt
+                // one of its transactions, and the watch refuses commands until that data has been read.
+                transport.drain()
+                // A borrowed session is already open.
+                if (owned) {
+                    Log.i("AndroidMTP", "Raw MTP OpenSession")
+                    val open = try {
+                        transport.command(OPEN_SESSION, 0, 1)
+                    } catch (firstError: Exception) {
+                        Log.w("AndroidMTP", "Raw MTP OpenSession failed; recovering USB transport", firstError)
+                        recoverTransport(connection, usbInterface, input, output)
+                        transport.drain()
+                        transport.command(OPEN_SESSION, 0, 1)
                     }
+                    // Like Android's MtpDevice, don't insist on OpenSession: a reply left over from another host's
+                    // transaction (e.g. 0x2005) may arrive here, and the device still accepts the following operations.
+                    if (open.code != OK && open.code != SESSION_ALREADY_OPEN)
+                        Log.w("AndroidMTP", "MTP OpenSession returned ${open.code.hex()}; continuing")
                 }
-                Log.i("AndroidMTP", "Raw MTP check destination")
-                val existing = transport.commandForData(GET_OBJECT_HANDLES, transaction++,
-                    storageId, 0, parent).intArray()
-                check(existing.none { candidate ->
-                    transport.commandForData(GET_OBJECT_INFO, transaction++, candidate)
-                        .objectNameAndFormat().first == file.name
-                }) { "Destination already contains ${file.name}" }
-                val size = file.length()
-                check(size <= 0xfffffff3L) { "Raw MTP upload currently supports files smaller than 4 GB" }
-                for (wideSize in listOf(false, true)) {
-                    Log.i("AndroidMTP", "Raw MTP SendObjectInfo wideSize=$wideSize")
-                    val response = transport.commandWithData(SEND_OBJECT_INFO, transaction++,
-                        objectInfo(storageId, parent, file.name, size, wideSize), storageId, parent)
-                    if (response.code == OK) {
-                        handle = response.parameters.getOrNull(2)
-                            ?: error("MTP did not return a new file handle")
-                        break
-                    }
-                    if (response.code != INVALID_DATASET || wideSize)
-                        error("MTP SendObjectInfo returned ${response.code.hex()}")
+            } catch (e: Exception) {
+                if (owned) {
+                    connection.releaseInterface(usbInterface)
+                    connection.close()
                 }
-                check(handle >= 0) { "MTP did not create the file" }
-                Log.i("AndroidMTP", "Raw MTP SendObject")
-                val sent = transport.commandWithFile(SEND_OBJECT, transaction++, file)
-                if (sent.code != OK) {
-                    runCatching { transport.command(DELETE_OBJECT, transaction++, handle) }
-                    error("MTP SendObject returned ${sent.code.hex()}")
-                }
-                return handle
-            } finally {
-                runCatching { transport.command(CLOSE_SESSION, transaction) }
+                throw e
             }
-        } finally {
+        }
+
+        /** Returns the handle of [folders] below the storage root, or -1 (root) when empty. */
+        fun resolve(storageId: Int, folders: List<String>): Int {
+            var parent = -1
+            for (folderName in folders) {
+                val handles = transport.commandForData(GET_OBJECT_HANDLES, transaction++,
+                    storageId, 0, parent).intArray()
+                parent = handles.firstOrNull { candidate ->
+                    val info = transport.commandForData(GET_OBJECT_INFO, transaction++, candidate)
+                        .objectNameAndFormat()
+                    info.first == folderName && info.second == MtpConstants.FORMAT_ASSOCIATION
+                } ?: error("MTP folder $folderName is unavailable")
+            }
+            return parent
+        }
+
+        fun upload(storageId: Int, parent: Int, file: File,
+            onProgress: (Long, Long) -> Unit = { _, _ -> }): Int {
+            val started = System.currentTimeMillis()
+            fun elapsed() = "${System.currentTimeMillis() - started} ms"
+            val ids = storageIds ?: transport.commandForData(GET_STORAGE_IDS, transaction++).intArray().toSet()
+                .also { storageIds = it }
+            check(storageId in ids) { "MTP storage $storageId is unavailable: $ids" }
+            val existing = names.getOrPut(storageId to parent) {
+                transport.commandForData(GET_OBJECT_HANDLES, transaction++, storageId, 0, parent).intArray()
+                    .mapTo(mutableSetOf()) {
+                        transport.commandForData(GET_OBJECT_INFO, transaction++, it).objectNameAndFormat().first
+                    }.also { Log.i("AndroidMTP", "Raw MTP listed ${it.size} destination objects in ${elapsed()}") }
+            }
+            check(file.name !in existing) { "Destination already contains ${file.name}" }
+            val size = file.length()
+            check(size <= 0xfffffff3L) { "Raw MTP upload currently supports files smaller than 4 GB" }
+            var handle = -1
+            for (wideSize in listOf(false, true)) {
+                val response = transport.commandWithData(SEND_OBJECT_INFO, transaction++,
+                    objectInfo(storageId, parent, file.name, size, wideSize), storageId, parent)
+                if (response.code == OK) {
+                    handle = response.parameters.getOrNull(2) ?: error("MTP did not return a new file handle")
+                    break
+                }
+                if (response.code != INVALID_DATASET || wideSize)
+                    error("MTP SendObjectInfo returned ${response.code.hex()}")
+            }
+            check(handle >= 0) { "MTP did not create the file" }
+            val sent = transport.commandWithFile(SEND_OBJECT, transaction++, file, onProgress)
+            if (sent.code != OK) {
+                runCatching { transport.command(DELETE_OBJECT, transaction++, handle) }
+                error("MTP SendObject returned ${sent.code.hex()}")
+            }
+            existing += file.name
+            Log.i("AndroidMTP", "Raw MTP uploaded ${file.name} ($size bytes) in ${elapsed()}")
+            return handle
+        }
+
+        override fun close() {
+            if (!owned) return
+            runCatching { transport.command(CLOSE_SESSION, transaction) }
             connection.releaseInterface(usbInterface)
             connection.close()
         }
@@ -204,24 +218,6 @@ internal object RawMtpUploader {
 
     private fun Int.hex() = "0x${toString(16)}"
 
-    private fun ByteArray.deviceInfoModel(): String? {
-        val data = ByteBuffer.wrap(this).order(ByteOrder.LITTLE_ENDIAN)
-        fun string(): String = buildString {
-            val length = data.get().toInt() and 0xff
-            repeat(length) { data.char.takeIf { it != '\u0000' }?.let(::append) }
-        }
-        fun skipUint16Array() {
-            val count = data.int
-            data.position(data.position() + count * 2)
-        }
-        data.position(8) // StandardVersion, VendorExtensionID, VendorExtensionVersion
-        string() // VendorExtensionDesc
-        data.short // FunctionalMode
-        repeat(5) { skipUint16Array() } // Operations, events, properties, capture and playback formats
-        string() // Manufacturer
-        return string().trim().takeIf { it.isNotEmpty() }
-    }
-
     private fun ByteArray.intArray(): IntArray {
         val data = ByteBuffer.wrap(this).order(ByteOrder.LITTLE_ENDIAN)
         check(data.remaining() >= 4) { "Short MTP integer array" }
@@ -279,7 +275,7 @@ internal object RawMtpUploader {
             return bytes
         }
 
-        fun commandWithFile(code: Int, transaction: Int, file: File): Reply {
+        fun commandWithFile(code: Int, transaction: Int, file: File, onProgress: (Long, Long) -> Unit): Reply {
             val request = header(12, COMMAND, code, transaction)
             write(request.array())
             write(header((12 + file.length()).toInt(), DATA, code, transaction).array())
@@ -296,6 +292,7 @@ internal object RawMtpUploader {
                     }
                     write(buffer, read)
                     remaining -= read
+                    onProgress(file.length() - remaining, file.length())
                 }
             }
             endTransfer(file.length())
