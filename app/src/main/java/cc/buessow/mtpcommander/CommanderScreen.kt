@@ -27,7 +27,10 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -41,6 +44,8 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
@@ -54,6 +59,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardCapitalization
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
@@ -74,12 +82,19 @@ internal data class CommanderPane(
     val title: String, val path: List<CommanderCrumb>, val entries: List<CommanderItem>,
     val status: String, val busy: Boolean, val canBack: Boolean,
     val actionLabel: String, val navigationKey: String,
-    val selectedIds: Set<String> = emptySet(), val cursor: String? = null, val draggable: Boolean = false
+    val cursor: String? = null, val draggable: Boolean = false
 )
 
 internal enum class CommanderMode { NONE, COPY, DELETE }
 
-private data class Drag(val from: Int, val items: List<CommanderItem>, val position: Offset)
+/** A search match; [folder] is its location relative to the folder the search started in. */
+internal data class SearchHit(val item: CommanderItem, val folder: String)
+
+/** While [active], the lower pane lists the hits and the upper pane shows the query, trash or copy [target]. */
+internal data class SearchState(val active: Boolean, val target: Int, val root: String, val query: String,
+    val hits: List<SearchHit>, val busy: Boolean, val status: String)
+
+private data class Drag(val from: Int, val items: List<CommanderItem>, val position: Offset, val hit: Boolean = false)
 
 private val paper = Color(0xFFF5F0E8)
 private val ink = Color(0xFF2C455D)
@@ -99,15 +114,24 @@ internal fun CommanderScreen(
     onDismissPhoneAccess: () -> Unit, mode: CommanderMode, onMode: (CommanderMode) -> Unit,
     trashPane: Int, trash: List<CommanderItem>, onDrop: (Int, Int, List<CommanderItem>) -> Unit,
     onRemoveFromTrash: (String) -> Unit, onDelete: () -> Unit,
-    onToggle: (Int, String) -> Unit, onSelectAll: () -> Unit, onCursor: (Int, String) -> Unit
+    search: SearchState, onSearchToggle: () -> Unit, onSearchQuery: (String) -> Unit, onSearch: () -> Unit,
+    onDropHit: (String) -> Unit, onCursor: (Int, String) -> Unit
 ) {
     val density = LocalDensity.current
     val paneBounds = remember { mutableStateListOf(Rect.Zero, Rect.Zero) }
     val buttonBounds = remember { mutableStateListOf(Rect.Zero, Rect.Zero, Rect.Zero) }
     var drag by remember { mutableStateOf<Drag?>(null) }
     var balloonHidden by remember(mode) { mutableStateOf(false) }
+    val trashSlot = if (search.active) 0 else trashPane
     fun dropTarget(current: Drag): Int? = paneBounds.indexOfFirst { it.contains(current.position) }
-        .takeIf { it >= 0 && it != current.from && (mode == CommanderMode.COPY || it == trashPane) }
+        .takeIf { it >= 0 && it != current.from && (mode == CommanderMode.COPY || it == trashSlot) }
+    val onDragBy = { amount: Offset -> drag = drag?.let { it.copy(position = it.position + amount) } }
+    val onDragEnd = {
+        drag?.let { current -> dropTarget(current)?.let { target ->
+            if (current.hit) onDropHit(current.items.single().id) else onDrop(current.from, target, current.items)
+        } }
+        drag = null
+    }
     if (showPhoneAccessExplanation) {
         AlertDialog(
             onDismissRequest = onDismissPhoneAccess,
@@ -132,12 +156,12 @@ internal fun CommanderScreen(
         }
         Row(Modifier.fillMaxWidth().border(BorderStroke(0.5.dp, divider))) {
             listOf(Triple("Copy", "▣", CommanderMode.COPY), Triple("Delete", "×", CommanderMode.DELETE),
-                Triple("Select", "☑", null)).forEachIndexed { index, (label, icon, toggle) ->
-                val on = toggle != null && mode == toggle
+                Triple("Search", "⌕", null)).forEachIndexed { index, (label, icon, toggle) ->
+                val on = if (toggle == null) search.active else mode == toggle
                 Column(Modifier.weight(1f).height(56.dp)
                     .onGloballyPositioned { buttonBounds[index] = it.boundsInRoot() }
                     .background(if (on) active else paper)
-                    .clickable { if (toggle == null) onSelectAll() else onMode(toggle) }
+                    .clickable { if (toggle == null) onSearchToggle() else onMode(toggle) }
                     .border(BorderStroke(0.5.dp, divider)),
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.Center) {
@@ -147,40 +171,44 @@ internal fun CommanderScreen(
                 }
             }
         }
-        panes.forEachIndexed { index, pane ->
-            if (index == 1) Spacer(Modifier.fillMaxWidth().height(1.dp).background(divider))
-            val target = drag?.let(::dropTarget) == index
+        panes.indices.forEach { slot ->
+            if (slot == 1) Spacer(Modifier.fillMaxWidth().height(1.dp).background(divider))
+            val target = drag?.let(::dropTarget) == slot
             val paneModifier = Modifier.weight(1f)
-                .onGloballyPositioned { paneBounds[index] = it.boundsInRoot() }
+                .onGloballyPositioned { paneBounds[slot] = it.boundsInRoot() }
                 .then(if (target) Modifier.border(2.dp, accent) else Modifier)
-            if (mode == CommanderMode.DELETE && index == trashPane)
+            // Index of the folder pane shown in this slot; while searching only the copy target is shown.
+            val index = if (search.active) search.target else slot
+            val pane = panes[index]
+            if (search.active && slot == 1) SearchResults(search,
+                dragEnabled = mode != CommanderMode.NONE,
+                onDragStart = { item, position -> balloonHidden = true; drag = Drag(slot, listOf(item), position, hit = true) },
+                onDragBy = onDragBy, onDragEnd = onDragEnd, onDragCancel = { drag = null }, modifier = paneModifier)
+            else if (search.active && mode == CommanderMode.NONE)
+                SearchInput(search, onSearchQuery, onSearch, modifier = paneModifier)
+            else if (mode == CommanderMode.DELETE && slot == trashSlot)
                 Trash(trash, onRemove = onRemoveFromTrash, onDelete = onDelete, modifier = paneModifier)
             else key(index, pane.navigationKey) {
                 Pane(
                     title = pane.title, symbol = if (index == 0) "▯" else "◉", path = pane.path,
                     entries = pane.entries, isActive = activePane == index, isBusy = pane.busy,
-                    selectedIds = pane.selectedIds, cursor = pane.cursor,
-                    onToggle = { onToggle(index, it) }, onCursor = { onCursor(index, it) },
+                    cursor = pane.cursor, onCursor = { onCursor(index, it) },
                     emptyMessage = pane.status,
                     actionLabel = pane.actionLabel, onAction = { onAction(index) },
                     onNavigate = { depth -> onActivate(index); onNavigate(index, depth) },
                     onOpen = { item -> if (item.directory) onOpen(index, item) else onActivate(index) },
                     onActivate = { onActivate(index) },
-                    hint = when (mode) {
-                        CommanderMode.COPY -> "LONG-PRESS & DRAG TO COPY"
-                        CommanderMode.DELETE -> "LONG-PRESS & DRAG TO TRASH"
-                        CommanderMode.NONE -> ""
+                    hint = when {
+                        search.active && mode == CommanderMode.COPY -> "DROP RESULTS HERE TO COPY"
+                        mode == CommanderMode.COPY -> "LONG-PRESS & DRAG TO COPY"
+                        mode == CommanderMode.DELETE -> "LONG-PRESS & DRAG TO TRASH"
+                        else -> ""
                     },
-                    dragEnabled = mode != CommanderMode.NONE && pane.draggable && !pane.busy,
+                    dragEnabled = !search.active && mode != CommanderMode.NONE && pane.draggable && !pane.busy,
                     onDragStart = { items, position ->
-                        onActivate(index); balloonHidden = true; drag = Drag(index, items, position)
+                        onActivate(index); balloonHidden = true; drag = Drag(slot, items, position)
                     },
-                    onDragBy = { amount -> drag = drag?.let { it.copy(position = it.position + amount) } },
-                    onDragEnd = {
-                        drag?.let { current -> dropTarget(current)?.let { onDrop(current.from, it, current.items) } }
-                        drag = null
-                    },
-                    onDragCancel = { drag = null },
+                    onDragBy = onDragBy, onDragEnd = onDragEnd, onDragCancel = { drag = null },
                     modifier = paneModifier
                 )
             }
@@ -191,9 +219,12 @@ internal fun CommanderScreen(
     }
     val button = buttonBounds[if (mode == CommanderMode.DELETE) 1 else 0]
     if (mode != CommanderMode.NONE && !balloonHidden && button != Rect.Zero) {
-        val message = if (mode == CommanderMode.COPY)
-            "Long-press a file and drag it onto the other pane to copy it there. If the file is marked, " +
-                "all marked files are copied. Tap COPY again when done."
+        val message = if (search.active && mode == CommanderMode.COPY)
+            "Long-press a search result and drag it into the folder above to copy it there."
+        else if (search.active) "Long-press search results and drag them into the trash above. Nothing is deleted " +
+            "until you press DELETE in the trash."
+        else if (mode == CommanderMode.COPY)
+            "Long-press a file and drag it onto the other pane to copy it there. Tap COPY again when done."
         else "Long-press files or folders and drag them into the trash. Nothing is deleted until you " +
             "press DELETE in the trash; tap an item there to take it out again."
         Column(Modifier.offset { IntOffset(0, button.bottom.toInt()) }.fillMaxWidth()
@@ -225,6 +256,79 @@ internal fun CommanderScreen(
                 .widthIn(max = 220.dp),
             color = paper, fontSize = 13.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
+    }
+}
+
+@Composable
+private fun SearchInput(search: SearchState, onQuery: (String) -> Unit, onSearch: () -> Unit, modifier: Modifier) {
+    val focus = remember { FocusRequester() }
+    LaunchedEffect(Unit) { focus.requestFocus() }
+    Column(modifier.background(paper)) {
+        PanelHeader("⌕", "SEARCH", search.root)
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            OutlinedTextField(search.query, onQuery, Modifier.fillMaxWidth().focusRequester(focus),
+                singleLine = true, placeholder = { Text("Name or pattern, e.g. *.fit") },
+                trailingIcon = { TextButton(onClick = onSearch) { Text("SEARCH", color = accent, fontWeight = FontWeight.Bold) } },
+                // File names and patterns are not words; autocorrect turns "img" into "omg".
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search, autoCorrectEnabled = false,
+                    capitalization = KeyboardCapitalization.None, keyboardType = KeyboardType.Uri),
+                keyboardActions = KeyboardActions(onSearch = { onSearch() }))
+            Text("Searches all subfolders. Text matches any part of a name. Use * for any characters and ? for " +
+                "one character; a pattern must then match the whole name. Case is ignored.", color = muted, fontSize = 12.sp)
+        }
+    }
+}
+
+@Composable
+private fun SearchResults(search: SearchState, dragEnabled: Boolean,
+    onDragStart: (CommanderItem, Offset) -> Unit, onDragBy: (Offset) -> Unit, onDragEnd: () -> Unit,
+    onDragCancel: () -> Unit, modifier: Modifier) {
+    Column(modifier.background(paper)) {
+        PanelHeader("▤", "RESULTS", "${search.hits.size} found")
+        LazyColumn(Modifier.weight(1f)) {
+            items(search.hits, key = { it.item.id }) { hit ->
+                var coordinates by remember { mutableStateOf<LayoutCoordinates?>(null) }
+                Row(Modifier.fillMaxWidth().height(48.dp)
+                    .onGloballyPositioned { coordinates = it }
+                    .then(if (dragEnabled) Modifier.pointerInput(hit.item.id) {
+                        detectDragGesturesAfterLongPress(
+                            onDragStart = { offset -> onDragStart(hit.item, coordinates?.localToRoot(offset) ?: offset) },
+                            onDrag = { change, amount -> change.consume(); onDragBy(amount) },
+                            onDragEnd = onDragEnd, onDragCancel = onDragCancel)
+                    } else Modifier)
+                    .padding(horizontal = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text(if (hit.item.directory) "▱" else "▤", color = if (hit.item.directory) accent else ink,
+                        fontSize = 17.sp)
+                    Spacer(Modifier.width(6.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(hit.item.name, maxLines = 1, overflow = TextOverflow.Ellipsis, fontSize = 13.sp, color = ink,
+                            fontWeight = if (hit.item.directory) FontWeight.SemiBold else FontWeight.Normal)
+                        Text(hit.folder.ifEmpty { "." }, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                            fontSize = 10.sp, color = muted)
+                    }
+                }
+                Spacer(Modifier.fillMaxWidth().height(0.5.dp).background(divider.copy(alpha = 0.5f)))
+            }
+        }
+        Row(Modifier.fillMaxWidth().height(27.dp).border(BorderStroke(0.5.dp, divider))
+            .padding(horizontal = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+            if (search.busy) CircularProgressIndicator(Modifier.size(12.dp), color = accent, strokeWidth = 1.5.dp)
+            if (search.busy) Spacer(Modifier.width(6.dp))
+            Text(search.status, fontSize = 11.sp, color = muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+    }
+}
+
+@Composable
+private fun PanelHeader(symbol: String, title: String, detail: String) {
+    Row(Modifier.fillMaxWidth().height(37.dp).background(active).padding(horizontal = 10.dp),
+        verticalAlignment = Alignment.CenterVertically) {
+        Text(symbol, color = paper, fontSize = 17.sp)
+        Spacer(Modifier.width(7.dp))
+        Text(title, color = paper, fontSize = 15.sp, fontWeight = FontWeight.Bold, letterSpacing = 0.8.sp)
+        Spacer(Modifier.width(10.dp))
+        Text(detail, Modifier.weight(1f), color = Color(0xFFE6DBD0), fontSize = 11.sp, maxLines = 1,
+            overflow = TextOverflow.Ellipsis, textAlign = TextAlign.End)
     }
 }
 
@@ -270,7 +374,7 @@ private fun Trash(entries: List<CommanderItem>, onRemove: (String) -> Unit, onDe
 private fun Pane(
     title: String, symbol: String, path: List<CommanderCrumb>, entries: List<CommanderItem>,
     isActive: Boolean, isBusy: Boolean, emptyMessage: String,
-    selectedIds: Set<String>, cursor: String?, onToggle: (String) -> Unit, onCursor: (String) -> Unit,
+    cursor: String?, onCursor: (String) -> Unit,
     actionLabel: String, onAction: () -> Unit, onNavigate: (Int) -> Unit,
     onOpen: (CommanderItem) -> Unit, onActivate: () -> Unit, hint: String, dragEnabled: Boolean,
     onDragStart: (List<CommanderItem>, Offset) -> Unit, onDragBy: (Offset) -> Unit,
@@ -311,43 +415,30 @@ private fun Pane(
         }
         Row(Modifier.fillMaxWidth().height(23.dp).border(BorderStroke(0.5.dp, divider)),
             verticalAlignment = Alignment.CenterVertically) {
-            Spacer(Modifier.width(34.dp))
+            Spacer(Modifier.width(10.dp))
             ColumnLabel("NAME", Modifier.weight(1f))
             ColumnLabel("SIZE", Modifier.width(60.dp), TextAlign.End)
             ColumnLabel("DATE", Modifier.width(72.dp), TextAlign.End)
         }
         LazyColumn(Modifier.weight(1f), state = listState) {
             items(entries, key = { it.id }) { item ->
-                val marked = item.id in selectedIds
                 var coordinates by remember { mutableStateOf<LayoutCoordinates?>(null) }
                 Row(Modifier.fillMaxWidth().height(40.dp)
                     .onGloballyPositioned { coordinates = it }
-                    .then(if (dragEnabled) Modifier.pointerInput(item.id, selectedIds) {
+                    .then(if (dragEnabled) Modifier.pointerInput(item.id) {
                         detectDragGesturesAfterLongPress(
-                            onDragStart = { offset ->
-                                val dragged = if (item.id in selectedIds) entries.filter { it.id in selectedIds }
-                                    else listOf(item)
-                                onDragStart(dragged, coordinates?.localToRoot(offset) ?: offset)
-                            },
+                            onDragStart = { offset -> onDragStart(listOf(item), coordinates?.localToRoot(offset) ?: offset) },
                             onDrag = { change, amount -> change.consume(); onDragBy(amount) },
                             onDragEnd = onDragEnd, onDragCancel = onDragCancel)
                     } else Modifier)
                     .background(if (isActive && cursor == item.id) selected else if (cursor == item.id) Color(0xFFEAE2D9) else paper)
                     .clickable { onCursor(item.id); onOpen(item) }, verticalAlignment = Alignment.CenterVertically) {
-                    Box(Modifier.width(34.dp).height(40.dp).clickable {
-                        onActivate(); onToggle(item.id)
-                    },
-                        contentAlignment = Alignment.Center) {
-                        Box(Modifier.size(15.dp).background(if (marked) accent else paper)
-                            .border(1.dp, if (marked) accent else muted), contentAlignment = Alignment.Center) {
-                            if (marked) Text("✓", color = paper, fontSize = 11.sp, lineHeight = 11.sp)
-                        }
-                    }
+                    Spacer(Modifier.width(10.dp))
                     Text(if (item.directory) "▱" else "▤", color = if (item.directory) accent else ink, fontSize = 17.sp)
                     Spacer(Modifier.width(6.dp))
                     Text(item.name, Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis,
                         fontWeight = if (item.directory) FontWeight.SemiBold else FontWeight.Normal,
-                        fontSize = 13.sp, color = if (marked) accent else ink)
+                        fontSize = 13.sp, color = ink)
                     Text(if (item.directory || item.size < 0) "" else Formatter.formatShortFileSize(context, item.size),
                         Modifier.width(60.dp).padding(end = 4.dp), textAlign = TextAlign.End,
                         maxLines = 1, fontSize = 10.sp, color = muted)
@@ -370,8 +461,7 @@ private fun Pane(
         }
         Row(Modifier.fillMaxWidth().height(27.dp).border(BorderStroke(0.5.dp, divider))
             .padding(horizontal = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text(if (selectedIds.isEmpty()) "${entries.size} items" else "${selectedIds.size} marked",
-                fontSize = 11.sp, color = if (selectedIds.isEmpty()) muted else accent)
+            Text("${entries.size} items", fontSize = 11.sp, color = muted)
             Spacer(Modifier.weight(1f))
             Text(hint, fontSize = 10.sp, color = accent, letterSpacing = 0.5.sp)
         }

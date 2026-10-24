@@ -47,7 +47,6 @@ private data class PaneState(
     val entries: List<CommanderItem> = emptyList(),
     val status: String = "Select a device to browse.",
     val busy: Boolean = false,
-    val selectedIds: Set<String> = emptySet(),
     val cursor: String? = null,
     val revision: Int = 0
 )
@@ -76,6 +75,17 @@ class MainActivity : ComponentActivity() {
     // In delete mode this pane shows the trash; items are dragged into it from the other pane.
     private var trashPane by mutableStateOf(1)
     private var trash by mutableStateOf<List<TrashEntry>>(emptyList())
+    // Search runs recursively below the folder that was open in searchPane when search mode started.
+    private var searchOn by mutableStateOf(false)
+    private var searchPane = 0
+    private var searchRoot: PaneState? = null
+    private var searchRootLabel by mutableStateOf("")
+    private var searchQuery by mutableStateOf("")
+    private var searchHits by mutableStateOf<List<SearchResult>>(emptyList())
+    private var searchBusy by mutableStateOf(false)
+    private var searchStatus by mutableStateOf("")
+    private var searchGeneration = 0
+    private data class SearchResult(val hit: SearchHit, val phoneFolders: List<File>, val folders: List<Folder>)
     private data class TrashEntry(val pane: PaneState, val item: CommanderItem, val epoch: Int?) {
         val key = "${pane.deviceName ?: "phone"}:${item.id}"
     }
@@ -161,11 +171,10 @@ class MainActivity : ComponentActivity() {
                     },
                     onRemoveFromTrash = { key -> trash = trash.filter { it.key != key } },
                     onDelete = ::deleteTrash,
-                    onToggle = { index, id -> update(index) { pane -> pane.copy(
-                        selectedIds = if (id in pane.selectedIds) pane.selectedIds - id else pane.selectedIds + id) } },
-                    onSelectAll = { val index = activePane; update(index) { pane -> pane.copy(
-                        selectedIds = if (pane.selectedIds.size == pane.entries.size) emptySet()
-                        else pane.entries.mapTo(mutableSetOf()) { it.id }) } },
+                    search = SearchState(searchOn, 1 - searchPane, searchRootLabel, searchQuery,
+                        searchHits.map { it.hit }, searchBusy, searchStatus),
+                    onSearchToggle = ::toggleSearch, onSearchQuery = { searchQuery = it }, onSearch = ::startSearch,
+                    onDropHit = ::dropSearchHit,
                     onCursor = { index, id -> update(index) { it.copy(cursor = id) } }
                 )
             }
@@ -247,7 +256,7 @@ class MainActivity : ComponentActivity() {
             draggable = pane.source == Source.PHONE || pane.source == Source.MTP && pane.storage != null,
             actionLabel = if (pane.source == Source.PHONE && !phoneAccess()) "Grant all-files access" else "Refresh",
             navigationKey = "$index:${pane.source}:${pane.deviceName}:${pane.storage?.id}:${pane.folders.map { it.handle }}:${pane.phoneFolders.map { it.path }}",
-            selectedIds = pane.selectedIds, cursor = pane.cursor
+            cursor = pane.cursor
         )
     }
 
@@ -385,7 +394,7 @@ class MainActivity : ComponentActivity() {
         val folder = pane.phoneFolders.last()
         val revision = pane.revision + 1
         update(index) { it.copy(revision = revision, busy = true, entries = emptyList(),
-            selectedIds = emptySet(), cursor = null, status = "Reading phone folder…") }
+            cursor = null, status = "Reading phone folder…") }
         worker.execute {
             val result = try {
                 check(phoneAccess()) { "All-files access was revoked" }
@@ -712,7 +721,6 @@ class MainActivity : ComponentActivity() {
                     update(index) { it.copy(busy = false,
                         entries = result.getOrNull()?.map { entry -> CommanderItem(entry.handle.toString(), entry.name,
                             entry.directory, entry.size, entry.modified) } ?: it.entries,
-                        selectedIds = if (result.isSuccess) emptySet() else it.selectedIds,
                         cursor = if (result.isSuccess) null else it.cursor,
                         status = result.fold({ entries -> completionStatus ?: if (entries.isEmpty()) "Folder is empty."
                             else "${entries.size} items" }, { "Could not list files: ${it.message}" })) }
@@ -724,15 +732,126 @@ class MainActivity : ComponentActivity() {
     private fun toggleMode(toggled: CommanderMode) {
         val next = if (mode == toggled) CommanderMode.NONE else toggled
         if (mode == CommanderMode.DELETE) trash = emptyList()
-        if (next == CommanderMode.DELETE) trashPane = 1 - activePane
+        // While searching, the results come from searchPane and the other pane is the copy or trash target.
+        if (next == CommanderMode.DELETE) trashPane = if (searchOn) 1 - searchPane else 1 - activePane
         mode = next
+    }
+
+    private fun toggleSearch() {
+        if (searchOn) {
+            searchOn = false
+            searchGeneration++
+            searchBusy = false
+            searchHits = emptyList()
+            searchRoot = null
+            return
+        }
+        val root = panes[activePane]
+        if (!writablePane(root) || root.source == Source.PHONE && !phoneAccess()) {
+            update(activePane) { it.copy(status = "Open a folder to search in first.") }; return
+        }
+        if (mode == CommanderMode.DELETE && trashPane == activePane) trash = emptyList()
+        searchPane = activePane
+        trashPane = 1 - searchPane
+        searchRoot = root
+        searchRootLabel = paneData(activePane, root).path.joinToString(" / ") { it.label }
+        searchHits = emptyList()
+        searchStatus = "Enter a name or a pattern like *.fit"
+        searchOn = true
+    }
+
+    private fun dropSearchHit(id: String) {
+        val result = searchHits.firstOrNull { it.hit.item.id == id } ?: return
+        val root = searchRoot ?: return
+        val source = if (root.source == Source.PHONE) root.copy(phoneFolders = result.phoneFolders)
+            else root.copy(folders = result.folders)
+        when (mode) {
+            CommanderMode.COPY -> startCopy(searchPane, listOf(result.hit.item), source)
+            CommanderMode.DELETE -> addToTrash(searchPane, listOf(result.hit.item), source)
+            CommanderMode.NONE -> Unit
+        }
+    }
+
+    private fun startSearch() {
+        val root = searchRoot ?: return
+        val query = searchQuery.trim()
+        if (query.isEmpty()) return
+        val generation = ++searchGeneration
+        // Without wildcards a query matches any part of the name; with * or ? it must match the whole name.
+        val matcher = if (query.any { it == '*' || it == '?' }) Regex(query.split('*').joinToString(".*") { part ->
+            part.split('?').joinToString(".") { Regex.escape(it) } }, RegexOption.IGNORE_CASE)
+            .let { regex -> { name: String -> regex.matches(name) } }
+        else { name: String -> name.contains(query, ignoreCase = true) }
+        val epoch = root.deviceName?.let { epochs[it] }
+        searchHits = emptyList()
+        searchBusy = true
+        searchStatus = "Searching…"
+        worker.execute {
+            val found = mutableListOf<SearchResult>()
+            var scanned = 0
+            fun cancelled() = generation != searchGeneration
+            fun publish(done: Boolean, failure: String? = null) {
+                val snapshot = found.toList()
+                val count = scanned
+                runOnUiThread {
+                    if (isDestroyed || generation != searchGeneration) return@runOnUiThread
+                    searchHits = snapshot
+                    searchBusy = !done
+                    searchStatus = failure?.let { "Search stopped: $it · ${snapshot.size} found" }
+                        ?: if (done) "${snapshot.size} found in $count items"
+                        else "Searching… ${snapshot.size} found in $count items"
+                }
+            }
+            try {
+                if (root.source == Source.PHONE) {
+                    fun walk(folders: List<File>) {
+                        val children = folders.last().listFiles() ?: return
+                        for (file in children.sortedBy { it.name.lowercase() }) {
+                            if (cancelled()) return
+                            if (!isInPhoneStorage(file) || java.nio.file.Files.isSymbolicLink(file.toPath())) continue
+                            scanned++
+                            if (matcher(file.name)) found += SearchResult(SearchHit(
+                                CommanderItem(file.path, file.name, file.isDirectory,
+                                    if (file.isDirectory) -1 else file.length(), file.lastModified()),
+                                folders.drop(root.phoneFolders.size).joinToString("/") { it.name }), folders, emptyList())
+                            if (file.isDirectory) walk(folders + file)
+                            if (scanned % 500 == 0) publish(false)
+                        }
+                    }
+                    check(phoneAccess()) { "Phone access revoked" }
+                    walk(root.phoneFolders)
+                } else {
+                    val name = root.deviceName!!
+                    val storageId = root.storage!!.id
+                    fun walk(folders: List<Folder>) {
+                        val parent = folders.lastOrNull()?.handle ?: -1
+                        val infos = mtpHandles(name, storageId, parent).toList().mapNotNull { sessions[name]?.getObjectInfo(it) }
+                            .filter { it.parent == if (parent == -1) 0 else parent }
+                        for (info in infos.sortedBy { it.name.orEmpty().lowercase() }) {
+                            if (cancelled()) return
+                            check(epoch == epochs[name]) { "Device disconnected" }
+                            scanned++
+                            val directory = info.format == MtpConstants.FORMAT_ASSOCIATION
+                            val fileName = info.name ?: "Unnamed"
+                            if (matcher(fileName)) found += SearchResult(SearchHit(
+                                CommanderItem(info.objectHandle.toString(), fileName, directory,
+                                    info.compressedSizeLong, info.dateModified),
+                                folders.drop(root.folders.size).joinToString("/") { it.name }), emptyList(), folders)
+                            if (directory) walk(folders + Folder(info.objectHandle, fileName))
+                            if (scanned % 100 == 0) publish(false)
+                        }
+                    }
+                    walk(root.folders)
+                }
+                if (!cancelled()) publish(true)
+            } catch (e: Exception) { if (!cancelled()) publish(true, e.message ?: "error") }
+        }
     }
 
     private fun writablePane(pane: PaneState) = !pane.busy &&
         (pane.source == Source.PHONE || pane.source == Source.MTP && pane.storage != null)
 
-    private fun addToTrash(sourceIndex: Int, items: List<CommanderItem>) {
-        val source = panes[sourceIndex]
+    private fun addToTrash(sourceIndex: Int, items: List<CommanderItem>, source: PaneState = panes[sourceIndex]) {
         if (!writablePane(source)) {
             update(sourceIndex) { it.copy(status = "Open a folder before dragging items to the trash.") }; return
         }
@@ -742,7 +861,6 @@ class MainActivity : ComponentActivity() {
         val epoch = source.deviceName?.let { epochs[it] }
         val added = items.map { TrashEntry(source, it, epoch) }.filter { entry -> trash.none { it.key == entry.key } }
         trash = trash + added
-        update(sourceIndex) { it.copy(selectedIds = emptySet()) }
     }
 
     private fun deleteTrash() {
@@ -770,15 +888,19 @@ class MainActivity : ComponentActivity() {
                 if (isDestroyed) return@runOnUiThread
                 // Keep what was not deleted so it can be retried.
                 if (mode == CommanderMode.DELETE) trash = entries.drop(done) + trash
+                // Drop results that were deleted, including everything inside deleted folders.
+                val deleted = entries.take(done).map { it.item.id }.toSet()
+                searchHits = searchHits.filterNot { result -> result.hit.item.id in deleted ||
+                    deleted.any { result.hit.item.id.startsWith("$it/") } ||
+                    result.folders.any { it.handle.toString() in deleted } }
                 val progress = "$done/${entries.size} deleted"
                 finishPaneAction(sourceIndex, null, failure?.let { "Stopped: $it · $progress" } ?: progress)
             }
         }
     }
 
-    private fun startCopy(sourceIndex: Int, items: List<CommanderItem>) {
+    private fun startCopy(sourceIndex: Int, items: List<CommanderItem>, source: PaneState = panes[sourceIndex]) {
         val targetIndex = 1 - sourceIndex
-        val source = panes[sourceIndex]
         val destination = panes[targetIndex]
         if (!writablePane(source) || !writablePane(destination)) {
             update(sourceIndex) { it.copy(status = "Open a folder in each pane before copying.") }; return
@@ -846,7 +968,7 @@ class MainActivity : ComponentActivity() {
 
     private fun finishPaneAction(sourceIndex: Int, targetIndex: Int?, status: String) {
         listOfNotNull(sourceIndex, targetIndex).forEach { index ->
-            update(index) { it.copy(busy = false, selectedIds = emptySet(), status = status) }
+            update(index) { it.copy(busy = false, status = status) }
             when (panes[index].source) {
                 Source.PHONE -> listPhoneFolder(index, status)
                 Source.MTP -> if (panes[index].storage != null) listMtpFolder(index, status)
