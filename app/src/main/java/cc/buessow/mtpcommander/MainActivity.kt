@@ -31,6 +31,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import org.json.JSONArray
 
+private const val GARMIN_VENDOR_ID = 0x091e
 private const val ACTION_USB_PERMISSION = "cc.buessow.mtpcommander.USB_PERMISSION"
 private data class StorageEntry(val id: Int, val name: String)
 private data class DeviceIdentity(val isGarmin: Boolean, val model: String?)
@@ -59,6 +60,10 @@ class MainActivity : ComponentActivity() {
     private val sessions = mutableMapOf<String, MtpDevice>()
     private val epochs = ConcurrentHashMap<String, Int>()
     private val pendingDeviceNames = mutableSetOf<String>()
+    // Devices whose USB permission was requested only to read their model name.
+    private val identifyingDeviceNames = mutableSetOf<String>()
+    // Read each connected device's model at most once; a failed attempt blocks the USB worker for a while.
+    private val identifiedDeviceNames = mutableSetOf<String>()
 
     private var devices by mutableStateOf<List<UsbDevice>>(emptyList())
     private var identities by mutableStateOf<Map<String, DeviceIdentity>>(emptyMap())
@@ -67,10 +72,13 @@ class MainActivity : ComponentActivity() {
     private var panes by mutableStateOf(listOf(PaneState(), PaneState()))
     private var activePane by mutableStateOf(0)
     private var showPhoneAccessExplanation by mutableStateOf(false)
-    private var prompt by mutableStateOf<ActionPrompt?>(null)
-    private var pendingAction: PendingAction? = null
-    private data class PendingAction(val action: FileAction, val source: PaneState, val destination: PaneState?,
-        val items: List<CommanderItem>)
+    private var mode by mutableStateOf(CommanderMode.NONE)
+    // In delete mode this pane shows the trash; items are dragged into it from the other pane.
+    private var trashPane by mutableStateOf(1)
+    private var trash by mutableStateOf<List<TrashEntry>>(emptyList())
+    private data class TrashEntry(val pane: PaneState, val item: CommanderItem, val epoch: Int?) {
+        val key = "${pane.deviceName ?: "phone"}:${item.id}"
+    }
     private data class AutoCopyJob(val sourcePath: String, val deviceName: String,
         val storageId: Int, val storageName: String, val folderNames: List<String>,
         val vendorId: Int = 0, val productId: Int = 0)
@@ -85,12 +93,14 @@ class MainActivity : ComponentActivity() {
             when (intent.action) {
                 ACTION_USB_PERMISSION -> {
                     val device = intent.usbDevice() ?: return
+                    if (identifyingDeviceNames.remove(device.deviceName) &&
+                        intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)) identifyDevice(device)
                     if (!pendingDeviceNames.remove(device.deviceName)) return
                     if (panes.none { it.deviceName == device.deviceName }) return
                     if (intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false) &&
                         usbManager.deviceList.containsKey(device.deviceName)) {
                         val job = startupCopy?.takeIf { startupCopyStarted &&
-                            it.deviceName == device.deviceName && device.vendorId == 0x091e }
+                            it.deviceName == device.deviceName && device.vendorId == GARMIN_VENDOR_ID }
                         if (job == null) openDevice(device)
                         else {
                             startupCopy = null
@@ -130,7 +140,8 @@ class MainActivity : ComponentActivity() {
             AndroidMTPTheme(darkTheme = false, dynamicColor = false) {
                 CommanderScreen(
                     panes = panes.mapIndexed { index, pane -> paneData(index, pane) },
-                    activePane = activePane, onActivate = { activePane = it },
+                    activePane = activePane,
+                    onActivate = { if (mode != CommanderMode.DELETE || it != trashPane) activePane = it },
                     onOpen = { index, item -> activePane = index; openItem(index, item) },
                     onNavigate = ::navigateTo, onAction = { index ->
                         if (panes[index].source == Source.PHONE && !phoneAccess())
@@ -141,8 +152,15 @@ class MainActivity : ComponentActivity() {
                     showPhoneAccessExplanation = showPhoneAccessExplanation,
                     onConfirmPhoneAccess = ::requestPhoneAccess,
                     onDismissPhoneAccess = { showPhoneAccessExplanation = false },
-                    prompt = prompt, onDismissPrompt = { prompt = null; pendingAction = null },
-                    onConfirmPrompt = ::confirmAction, onFileAction = ::prepareAction,
+                    mode = mode, onMode = ::toggleMode, trashPane = trashPane,
+                    trash = trash.map { it.item.copy(id = it.key) },
+                    onDrop = { from, to, items ->
+                        if (mode == CommanderMode.COPY && to == 1 - from) startCopy(from, items)
+                        else if (mode == CommanderMode.DELETE && to == trashPane && from != trashPane)
+                            addToTrash(from, items)
+                    },
+                    onRemoveFromTrash = { key -> trash = trash.filter { it.key != key } },
+                    onDelete = ::deleteTrash,
                     onToggle = { index, id -> update(index) { pane -> pane.copy(
                         selectedIds = if (id in pane.selectedIds) pane.selectedIds - id else pane.selectedIds + id) } },
                     onSelectAll = { val index = activePane; update(index) { pane -> pane.copy(
@@ -226,6 +244,7 @@ class MainActivity : ComponentActivity() {
                 "No MTP devices found. Check USB cable and file transfer mode, then refresh. The phone is available above."
                 else pane.status,
             busy = pane.busy, canBack = canBack(pane),
+            draggable = pane.source == Source.PHONE || pane.source == Source.MTP && pane.storage != null,
             actionLabel = if (pane.source == Source.PHONE && !phoneAccess()) "Grant all-files access" else "Refresh",
             navigationKey = "$index:${pane.source}:${pane.deviceName}:${pane.storage?.id}:${pane.folders.map { it.handle }}:${pane.phoneFolders.map { it.path }}",
             selectedIds = pane.selectedIds, cursor = pane.cursor
@@ -398,7 +417,11 @@ class MainActivity : ComponentActivity() {
             }
         }.sortedBy { it.deviceName }
         val connected = devices.mapTo(mutableSetOf()) { it.deviceName }
-        identities = identities.filterKeys { it in connected }
+        identities = identities.filterKeys { it in connected } + devices.filter { it.deviceName !in identities }
+            .associate { it.deviceName to DeviceIdentity(it.vendorId == GARMIN_VENDOR_ID,
+                it.productName?.trim()?.takeIf(String::isNotEmpty)) }
+        identifyingDeviceNames.retainAll(connected)
+        identifiedDeviceNames.retainAll(connected)
         val missing = (panes.mapNotNull { it.deviceName } + readyDevices + pendingDeviceNames)
             .filter { it !in connected }.toSet()
         missing.forEach(::disconnect)
@@ -407,16 +430,47 @@ class MainActivity : ComponentActivity() {
             val device = devices.firstOrNull { it.deviceName == job.deviceName }
                 ?: devices.filter { it.vendorId == job.vendorId && it.productId == job.productId &&
                     job.vendorId != 0 }.singleOrNull()
-                ?: devices.filter { it.vendorId == 0x091e }.singleOrNull()
+                ?: devices.filter { it.vendorId == GARMIN_VENDOR_ID }.singleOrNull()
                     ?.takeIf { job.vendorId == 0 && job.folderNames.any { folder ->
                         folder.equals("GARMIN", ignoreCase = true) } }
             device?.let {
                 startupCopy = job.copy(deviceName = device.deviceName)
                 startupCopyStarted = true
-                if (device.vendorId == 0x091e && usbManager.hasPermission(device)) {
+                if (device.vendorId == GARMIN_VENDOR_ID && usbManager.hasPermission(device)) {
                     startupCopy = null
                     retryAutoCopyRaw(job.copy(deviceName = device.deviceName), device)
                 } else selectDevice(0, device)
+            }
+        }
+        devices.filter { identities[it.deviceName]?.model == null && it.deviceName !in readyDevices &&
+            it.deviceName !in pendingDeviceNames && it.deviceName !in identifyingDeviceNames &&
+            it.deviceName !in identifiedDeviceNames }.forEach { device ->
+            if (usbManager.hasPermission(device)) identifyDevice(device)
+            else {
+                identifyingDeviceNames += device.deviceName
+                val permissionIntent = PendingIntent.getBroadcast(this, device.deviceId,
+                    Intent(ACTION_USB_PERMISSION).setPackage(packageName)
+                        .setData(Uri.parse("mtp-identify:${device.deviceName}")),
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE)
+                try { usbManager.requestPermission(device, permissionIntent) }
+                catch (_: Exception) { identifyingDeviceNames.remove(device.deviceName) }
+            }
+        }
+    }
+
+    // USB descriptors of Garmin watches carry no product name, so ask the device itself.
+    private fun identifyDevice(device: UsbDevice) {
+        val name = device.deviceName
+        if (!identifiedDeviceNames.add(name)) return
+        val epoch = epochs[name]
+        worker.execute {
+            if (epoch != epochs[name] || name in sessions) return@execute
+            val model = runCatching { RawMtpUploader.deviceModel(usbManager, device) }
+                .onFailure { android.util.Log.w("AndroidMTP", "Could not read device model", it) }
+                .getOrNull() ?: return@execute
+            runOnUiThread {
+                if (!isDestroyed && name in identities && identities[name]?.model == null)
+                    identities = identities + (name to DeviceIdentity(device.vendorId == GARMIN_VENDOR_ID, model))
             }
         }
     }
@@ -448,6 +502,7 @@ class MainActivity : ComponentActivity() {
             return
         }
         if (device.deviceName in pendingDeviceNames) return
+        if (device.deviceName in identifyingDeviceNames) { pendingDeviceNames += device.deviceName; return }
         if (usbManager.hasPermission(device)) openDevice(device)
         else {
             pendingDeviceNames += device.deviceName
@@ -483,11 +538,12 @@ class MainActivity : ComponentActivity() {
                     StorageEntry(id, session.getStorageInfo(id)?.description?.takeIf { it.isNotBlank() } ?: "Storage $id")
                 } ?: emptyList()
                 android.util.Log.i("AndroidMTP", "MTP storages: ${found.map { it.id }}")
-                val garmin = device.vendorId == 0x091e
+                val garmin = device.vendorId == GARMIN_VENDOR_ID
                 val model = device.productName?.trim()?.takeIf { it.isNotEmpty() }
+                    ?: session.deviceInfo?.model?.trim()?.takeIf { it.isNotEmpty() }
                 runOnUiThread {
                     if (epoch == epochs[name] && !isDestroyed) {
-                        identities = identities + (name to DeviceIdentity(garmin, model))
+                        identities = identities + (name to DeviceIdentity(garmin, model ?: identities[name]?.model))
                         storages = storages + (name to found)
                         readyDevices = readyDevices + name
                         panes.indices.filter { panes[it].deviceName == device.deviceName }.forEach(::showStorages)
@@ -665,152 +721,136 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun prepareAction(action: FileAction) {
-        val source = panes[activePane]
-        val destination = if (action == FileAction.COPY) panes[1 - activePane] else null
-        if (source.busy || destination?.busy == true || source.source == Source.DEVICES ||
-            source.source == Source.MTP && source.storage == null ||
-            destination != null && (destination.source == Source.DEVICES || destination.source == Source.MTP && destination.storage == null)) {
-            update(activePane) { it.copy(status = "Open a writable folder in each required pane first.") }; return
-        }
-        val items = if (source.selectedIds.isNotEmpty()) source.entries.filter { it.id in source.selectedIds }
-            else source.entries.filter { it.id == source.cursor }
-        if (action == FileAction.COPY && source.source == Source.MTP && destination?.source == Source.PHONE &&
-            !phoneAccess()) {
-            update(activePane) { it.copy(status = "Grant all-files access to copy to the phone.") }; return
-        }
-        if (action == FileAction.COPY && destination?.source == Source.PHONE && !phoneAccess() ||
-            source.source == Source.PHONE && !phoneAccess()) {
-            update(activePane) { it.copy(status = "Grant all-files access before modifying phone storage.") }; return
-        }
-        if (action != FileAction.MKDIR && items.isEmpty()) {
-            update(activePane) { it.copy(status = "Mark items or tap one item first.") }; return
-        }
-        if (action == FileAction.RENAME && items.size != 1) {
-            update(activePane) { it.copy(status = "Rename requires exactly one item.") }; return
-        }
-        if (action == FileAction.RENAME && source.source == Source.MTP) {
-            update(activePane) { it.copy(status = "MTP rename is not supported by Android's public MtpDevice API.") }; return
-        }
-        if (action == FileAction.COPY && source.source == Source.MTP && destination?.source == Source.MTP) {
-            update(activePane) { it.copy(status = "Direct MTP-to-MTP copy is unavailable; copy to phone first.") }; return
-        }
-        pendingAction = PendingAction(action, source, destination, items)
-        if (action == FileAction.COPY) {
-            confirmAction("")
-            return
-        }
-        val names = items.take(3).joinToString(", ") { it.name } + if (items.size > 3) "…" else ""
-        prompt = ActionPrompt(action, action.name.lowercase().replaceFirstChar { it.uppercase() }, when (action) {
-            FileAction.COPY -> error("Copy starts without confirmation")
-            FileAction.DELETE -> "Permanently delete ${items.size} item(s) ($names)? Folders and all contents will be deleted. This cannot be undone."
-            FileAction.RENAME -> "Rename ${items.single().name} on the phone?"
-            FileAction.MKDIR -> "Create a new folder in this pane?"
-        }, if (action == FileAction.RENAME) items.single().name else "")
+    private fun toggleMode(toggled: CommanderMode) {
+        val next = if (mode == toggled) CommanderMode.NONE else toggled
+        if (mode == CommanderMode.DELETE) trash = emptyList()
+        if (next == CommanderMode.DELETE) trashPane = 1 - activePane
+        mode = next
     }
 
-    private fun confirmAction(input: String) {
-        val request = pendingAction ?: return
-        prompt = null; pendingAction = null
-        val sourceIndex = panes.indexOfFirst { it === request.source }
-        if (sourceIndex < 0) return
-        // Reject stale prompts if either pane has moved since the confirmation was prepared.
-        if (request.destination != null && panes[1 - sourceIndex] != request.destination) {
-            update(sourceIndex) { it.copy(status = "Folder changed; action cancelled. Try again.") }; return
+    private fun writablePane(pane: PaneState) = !pane.busy &&
+        (pane.source == Source.PHONE || pane.source == Source.MTP && pane.storage != null)
+
+    private fun addToTrash(sourceIndex: Int, items: List<CommanderItem>) {
+        val source = panes[sourceIndex]
+        if (!writablePane(source)) {
+            update(sourceIndex) { it.copy(status = "Open a folder before dragging items to the trash.") }; return
         }
-        if (request.action == FileAction.MKDIR || request.action == FileAction.RENAME) {
-            if (!validName(input)) {
-                update(sourceIndex) { it.copy(status = "Invalid name: use a single non-empty filename without / or \\.") }; return
+        if (source.source == Source.PHONE && !phoneAccess()) {
+            update(sourceIndex) { it.copy(status = "Grant all-files access before modifying phone storage.") }; return
+        }
+        val epoch = source.deviceName?.let { epochs[it] }
+        val added = items.map { TrashEntry(source, it, epoch) }.filter { entry -> trash.none { it.key == entry.key } }
+        trash = trash + added
+        update(sourceIndex) { it.copy(selectedIds = emptySet()) }
+    }
+
+    private fun deleteTrash() {
+        val entries = trash
+        val sourceIndex = 1 - trashPane
+        if (entries.isEmpty() || panes[sourceIndex].busy) return
+        trash = emptyList()
+        update(sourceIndex) { it.copy(busy = true, status = "Deleting ${entries.size} item(s)…") }
+        worker.execute {
+            var done = 0
+            var failure: String? = null
+            for (entry in entries) {
+                try {
+                    check(entry.pane.deviceName == null || entry.epoch == epochs[entry.pane.deviceName]) {
+                        "Device disconnected"
+                    }
+                    deleteEntry(entry.pane, entry.item)
+                    done++
+                } catch (e: Exception) {
+                    failure = "${e.message} (${entry.item.name})"
+                    break
+                }
+            }
+            runOnUiThread {
+                if (isDestroyed) return@runOnUiThread
+                // Keep what was not deleted so it can be retried.
+                if (mode == CommanderMode.DELETE) trash = entries.drop(done) + trash
+                val progress = "$done/${entries.size} deleted"
+                finishPaneAction(sourceIndex, null, failure?.let { "Stopped: $it · $progress" } ?: progress)
             }
         }
-        val targetIndex = if (request.destination != null) 1 - sourceIndex else sourceIndex
-        val source = request.source
-        val destination = request.destination
+    }
+
+    private fun startCopy(sourceIndex: Int, items: List<CommanderItem>) {
+        val targetIndex = 1 - sourceIndex
+        val source = panes[sourceIndex]
+        val destination = panes[targetIndex]
+        if (!writablePane(source) || !writablePane(destination)) {
+            update(sourceIndex) { it.copy(status = "Open a folder in each pane before copying.") }; return
+        }
+        if ((source.source == Source.PHONE || destination.source == Source.PHONE) && !phoneAccess()) {
+            update(sourceIndex) { it.copy(status = "Grant all-files access to copy to or from the phone.") }; return
+        }
+        if (source.source == Source.MTP && destination.source == Source.MTP) {
+            update(sourceIndex) { it.copy(status = "Direct MTP-to-MTP copy is unavailable; copy to phone first.") }; return
+        }
+        if (items.isEmpty()) return
         val sourceEpoch = source.deviceName?.let { epochs[it] }
-        val targetEpoch = destination?.deviceName?.let { epochs[it] }
-        update(sourceIndex) { it.copy(busy = true, status = "${request.action} in progress…") }
-        if (targetIndex != sourceIndex) update(targetIndex) { it.copy(busy = true, status = "Copy in progress…") }
+        val targetEpoch = destination.deviceName?.let { epochs[it] }
+        update(sourceIndex) { it.copy(busy = true, status = "Copy in progress…") }
+        update(targetIndex) { it.copy(busy = true, status = "Copy in progress…") }
         worker.execute {
             var done = 0
             var failure: String? = null
             var failedItem: CommanderItem? = null
-            try {
-                fun checkConnection() {
+            for (item in items) {
+                try {
                     check(source.deviceName == null || sourceEpoch == epochs[source.deviceName]) { "Source disconnected" }
-                    check(destination?.deviceName == null || targetEpoch == epochs[destination.deviceName]) { "Destination disconnected" }
-                }
-                checkConnection()
-                when (request.action) {
-                    FileAction.MKDIR -> {
-                        if (source.source == Source.PHONE) {
-                            check(phoneAccess()) { "Phone access revoked" }
-                            check(phoneChild(source, input).mkdir()) { "Could not create folder" }
-                        } else createMtpFolder(source, input)
-                        done++
+                    check(destination.deviceName == null || targetEpoch == epochs[destination.deviceName]) {
+                        "Destination disconnected"
                     }
-                    FileAction.RENAME -> {
-                        check(phoneAccess()) { "Phone access revoked" }
-                        val old = phoneItem(source, request.items.single())
-                        val new = phoneChild(source, input)
-                        check(old.renameTo(new)) { "Rename failed" }
-                        done++
-                    }
-                    else -> for (item in request.items) {
-                        try {
-                            checkConnection()
-                            if (request.action == FileAction.DELETE) deleteEntry(source, item)
-                            else {
-                                var lastProgress = 0L
-                                copyEntry(source, destination!!, item) { copied, total ->
-                                    if (source.source == Source.MTP &&
-                                        (copied == total || copied - lastProgress >= 8L * 1024 * 1024)) {
-                                        lastProgress = copied
-                                        runOnUiThread {
-                                            if (!isDestroyed && panes[sourceIndex].busy &&
-                                                panes[sourceIndex].deviceName == source.deviceName)
-                                                update(sourceIndex) { it.copy(
-                                                    status = "Copying ${item.name}: $copied / $total bytes") }
-                                        }
-                                    }
-                                }
+                    var lastProgress = 0L
+                    copyEntry(source, destination, item) { copied, total ->
+                        if (source.source == Source.MTP &&
+                            (copied == total || copied - lastProgress >= 8L * 1024 * 1024)) {
+                            lastProgress = copied
+                            runOnUiThread {
+                                if (!isDestroyed && panes[sourceIndex].busy &&
+                                    panes[sourceIndex].deviceName == source.deviceName)
+                                    update(sourceIndex) { it.copy(
+                                        status = "Copying ${item.name}: $copied / $total bytes") }
                             }
-                            done++
-                        } catch (e: Exception) {
-                            failedItem = item
-                            failure = "${e.message} (${item.name})"
-                            break
                         }
                     }
+                    done++
+                } catch (e: Exception) {
+                    failedItem = item
+                    failure = "${e.message} (${item.name})"
+                    break
                 }
-            } catch (e: Exception) { failure = e.message ?: "Operation failed" }
+            }
             runOnUiThread {
                 if (isDestroyed) return@runOnUiThread
-                if (request.action == FileAction.COPY && source.source == Source.PHONE &&
-                    destination?.source == Source.MTP) {
+                if (source.source == Source.PHONE && destination.source == Source.MTP) {
                     val failed = failedItem
                     val usbDevice = usbManager.deviceList[destination.deviceName]
                     if (failed != null && !failed.directory && failure != null) saveAutoCopyJob(AutoCopyJob(
                         failed.id, destination.deviceName!!, destination.storage!!.id,
                         destination.storage.name, destination.folders.map { it.name },
                         usbDevice?.vendorId ?: 0, usbDevice?.productId ?: 0))
-                    else if (failure == null && request.items.any { item ->
+                    else if (failure == null && items.any { item ->
                         readAutoCopyJob()?.let { it.sourcePath == item.id &&
                             it.deviceName == destination.deviceName } == true
                     }) clearAutoCopyJob()
                 }
-                val progress = "$done/${if (request.action == FileAction.MKDIR) 1 else request.items.size} completed"
-                val status = failure?.let { "Stopped: $it · $progress" } ?: progress
-                // Refresh only the same folders; never refresh a different destination after navigation.
-                listOf(sourceIndex, targetIndex).distinct().forEach { index ->
-                    val snapshot = if (index == sourceIndex) source else destination!!
-                    if (panes[index].source == snapshot.source && panes[index].deviceName == snapshot.deviceName &&
-                        panes[index].storage == snapshot.storage && panes[index].folders == snapshot.folders &&
-                        panes[index].phoneFolders == snapshot.phoneFolders) {
-                        update(index) { it.copy(busy = false, selectedIds = emptySet(), cursor = null, status = status) }
-                        if (snapshot.source == Source.PHONE) listPhoneFolder(index, status)
-                        else listMtpFolder(index, status)
-                    }
-                }
+                val progress = "$done/${items.size} copied"
+                finishPaneAction(sourceIndex, targetIndex, failure?.let { "Stopped: $it · $progress" } ?: progress)
+            }
+        }
+    }
+
+    private fun finishPaneAction(sourceIndex: Int, targetIndex: Int?, status: String) {
+        listOfNotNull(sourceIndex, targetIndex).forEach { index ->
+            update(index) { it.copy(busy = false, selectedIds = emptySet(), status = status) }
+            when (panes[index].source) {
+                Source.PHONE -> listPhoneFolder(index, status)
+                Source.MTP -> if (panes[index].storage != null) listMtpFolder(index, status)
+                Source.DEVICES -> {}
             }
         }
     }
@@ -894,14 +934,6 @@ class MainActivity : ComponentActivity() {
         return handles.any { sessions[deviceName]?.getObjectInfo(it)?.name == name }
     }
 
-    private fun createMtpFolder(pane: PaneState, name: String): Int {
-        check(!mtpExists(pane, name)) { "Destination already exists" }
-        val info = MtpObjectInfo.Builder().setStorageId(pane.storage!!.id)
-            .setParent(pane.folders.lastOrNull()?.handle ?: -1).setName(name)
-            .setFormat(MtpConstants.FORMAT_ASSOCIATION).setAssociationType(1).build()
-        return sendMtpObjectInfo(pane, info).objectHandle
-    }
-
     private fun deleteEntry(pane: PaneState, item: CommanderItem) {
         if (pane.source == Source.PHONE) {
             check(phoneAccess()) { "Phone access revoked" }
@@ -956,7 +988,7 @@ class MainActivity : ComponentActivity() {
                 val name = target.deviceName ?: error("MTP device disconnected")
                 val device = usbManager.deviceList[name] ?: error("MTP device disconnected")
                 // MtpDevice.sendObjectInfo never gets an answer from Garmin watches, so use the raw path directly.
-                if (device.vendorId == 0x091e) {
+                if (device.vendorId == GARMIN_VENDOR_ID) {
                     sessions.remove(name)?.close()
                     try {
                         android.util.Log.i("AndroidMTP", "Trying raw Garmin MTP upload for ${file.name}")

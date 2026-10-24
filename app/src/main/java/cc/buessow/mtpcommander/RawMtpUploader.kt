@@ -17,6 +17,7 @@ internal object RawMtpUploader {
     private const val COMMAND = 1
     private const val DATA = 2
     private const val RESPONSE = 3
+    private const val GET_DEVICE_INFO = 0x1001
     private const val OPEN_SESSION = 0x1002
     private const val CLOSE_SESSION = 0x1003
     private const val GET_STORAGE_IDS = 0x1004
@@ -40,12 +41,25 @@ internal object RawMtpUploader {
         folders: List<String>, file: File): Int =
         upload(manager, device, storageId, folders, -1, file)
 
+    /** Reads the model name from MTP GetDeviceInfo, which needs no session; Garmin USB descriptors lack it. */
+    fun deviceModel(manager: UsbManager, device: UsbDevice): String? {
+        val usbInterface = device.mtpInterface()
+        val connection = manager.openDevice(device) ?: error("Could not open USB device")
+        try {
+            check(connection.claimInterface(usbInterface, true)) { "Could not claim the MTP USB interface" }
+            val transport = Transport(connection, usbInterface.bulkEndpoint(UsbConstants.USB_DIR_IN),
+                usbInterface.bulkEndpoint(UsbConstants.USB_DIR_OUT))
+            transport.drain()
+            return transport.commandForData(GET_DEVICE_INFO, 0).deviceInfoModel()
+        } finally {
+            connection.releaseInterface(usbInterface)
+            connection.close()
+        }
+    }
+
     private fun upload(manager: UsbManager, device: UsbDevice, storageId: Int,
         folders: List<String>, knownParent: Int, file: File): Int {
-        val usbInterface = (0 until device.interfaceCount).map(device::getInterface).firstOrNull { intf ->
-            intf.name?.contains("MTP", ignoreCase = true) == true ||
-                intf.interfaceClass == UsbConstants.USB_CLASS_STILL_IMAGE
-        } ?: error("MTP USB interface is unavailable")
+        val usbInterface = device.mtpInterface()
         val input = usbInterface.bulkEndpoint(UsbConstants.USB_DIR_IN)
         val output = usbInterface.bulkEndpoint(UsbConstants.USB_DIR_OUT)
         val connection = manager.openDevice(device) ?: error("Could not open USB device for upload")
@@ -127,6 +141,12 @@ internal object RawMtpUploader {
         }
     }
 
+    private fun UsbDevice.mtpInterface(): UsbInterface =
+        (0 until interfaceCount).map(::getInterface).firstOrNull { intf ->
+            intf.name?.contains("MTP", ignoreCase = true) == true ||
+                intf.interfaceClass == UsbConstants.USB_CLASS_STILL_IMAGE
+        } ?: error("MTP USB interface is unavailable")
+
     private fun UsbInterface.bulkEndpoint(direction: Int): UsbEndpoint =
         (0 until endpointCount).map(::getEndpoint).firstOrNull {
             it.type == UsbConstants.USB_ENDPOINT_XFER_BULK && it.direction == direction
@@ -183,6 +203,24 @@ internal object RawMtpUploader {
     }
 
     private fun Int.hex() = "0x${toString(16)}"
+
+    private fun ByteArray.deviceInfoModel(): String? {
+        val data = ByteBuffer.wrap(this).order(ByteOrder.LITTLE_ENDIAN)
+        fun string(): String = buildString {
+            val length = data.get().toInt() and 0xff
+            repeat(length) { data.char.takeIf { it != '\u0000' }?.let(::append) }
+        }
+        fun skipUint16Array() {
+            val count = data.int
+            data.position(data.position() + count * 2)
+        }
+        data.position(8) // StandardVersion, VendorExtensionID, VendorExtensionVersion
+        string() // VendorExtensionDesc
+        data.short // FunctionalMode
+        repeat(5) { skipUint16Array() } // Operations, events, properties, capture and playback formats
+        string() // Manufacturer
+        return string().trim().takeIf { it.isNotEmpty() }
+    }
 
     private fun ByteArray.intArray(): IntArray {
         val data = ByteBuffer.wrap(this).order(ByteOrder.LITTLE_ENDIAN)
