@@ -24,7 +24,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.foundation.text.KeyboardActions
@@ -122,7 +122,21 @@ internal fun CommanderScreen(
     val paneBounds = remember { mutableStateListOf(Rect.Zero, Rect.Zero) }
     val buttonBounds = remember { mutableStateListOf(Rect.Zero, Rect.Zero, Rect.Zero) }
     var drag by remember { mutableStateOf<Drag?>(null) }
-    var balloonHidden by remember(mode) { mutableStateOf(false) }
+    val context = LocalContext.current
+    // Each instruction balloon is shown once after install; the preference records which ones were seen.
+    val hints = remember { context.getSharedPreferences("hints", android.content.Context.MODE_PRIVATE) }
+    val balloon = when {
+        mode == CommanderMode.NONE -> null
+        search.active && mode == CommanderMode.COPY -> "search-copy"
+        search.active -> "search-delete"
+        mode == CommanderMode.COPY -> "copy"
+        else -> "delete"
+    }
+    var balloonHidden by remember(balloon) { mutableStateOf(balloon == null || hints.getBoolean(balloon, false)) }
+    LaunchedEffect(balloon) { if (balloon != null && !balloonHidden) hints.edit().putBoolean(balloon, true).apply() }
+    // Scroll positions live here, not in Pane, so they survive a pane being swapped for the trash or search box.
+    val listStates = remember { mutableMapOf<String, LazyListState>() }
+    listStates.keys.retainAll(panes.map { it.navigationKey }.toSet())
     val trashSlot = if (search.active) 0 else trashPane
     fun dropTarget(current: Drag): Int? = paneBounds.indexOfFirst { it.contains(current.position) }
         .takeIf { it >= 0 && it != current.from && (mode == CommanderMode.COPY || it == trashSlot) }
@@ -191,6 +205,7 @@ internal fun CommanderScreen(
                 Trash(trash, onRemove = onRemoveFromTrash, onDelete = onDelete, modifier = paneModifier)
             else key(index, pane.navigationKey) {
                 Pane(
+                    listState = listStates.getOrPut(pane.navigationKey) { LazyListState() },
                     title = pane.title, symbol = if (index == 0) "▯" else "◉", path = pane.path,
                     entries = pane.entries, isActive = activePane == index, isBusy = pane.busy,
                     cursor = pane.cursor, onCursor = { onCursor(index, it) }, progress = pane.progress,
@@ -219,15 +234,15 @@ internal fun CommanderScreen(
             color = muted, fontSize = 11.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
     }
     val button = buttonBounds[if (mode == CommanderMode.DELETE) 1 else 0]
-    if (mode != CommanderMode.NONE && !balloonHidden && button != Rect.Zero) {
-        val message = if (search.active && mode == CommanderMode.COPY)
-            "Long-press a search result and drag it into the folder above to copy it there."
-        else if (search.active) "Long-press search results and drag them into the trash above. Nothing is deleted " +
-            "until you press DELETE in the trash."
-        else if (mode == CommanderMode.COPY)
-            "Long-press a file and drag it onto the other pane to copy it there. Tap COPY again when done."
-        else "Long-press files or folders and drag them into the trash. Nothing is deleted until you " +
+    if (balloon != null && !balloonHidden && button != Rect.Zero) {
+        val message = when (balloon) {
+            "search-copy" -> "Long-press a search result and drag it into the folder above to copy it there."
+            "search-delete" -> "Long-press search results and drag them into the trash above. Nothing is deleted " +
+                "until you press DELETE in the trash."
+            "copy" -> "Long-press a file and drag it onto the other pane to copy it there. Tap COPY again when done."
+            else -> "Long-press files or folders and drag them into the trash. Nothing is deleted until you " +
             "press DELETE in the trash; tap an item there to take it out again."
+        }
         Column(Modifier.offset { IntOffset(0, button.bottom.toInt()) }.fillMaxWidth()
             .clickable { balloonHidden = true }) {
             // Outlined in paper so the balloon stands out on the dark pane and trash headers it overlaps.
@@ -373,7 +388,7 @@ private fun Trash(entries: List<CommanderItem>, onRemove: (String) -> Unit, onDe
 
 @Composable
 private fun Pane(
-    title: String, symbol: String, path: List<CommanderCrumb>, entries: List<CommanderItem>,
+    listState: LazyListState, title: String, symbol: String, path: List<CommanderCrumb>, entries: List<CommanderItem>,
     isActive: Boolean, isBusy: Boolean, emptyMessage: String,
     cursor: String?, onCursor: (String) -> Unit, progress: Float?,
     actionLabel: String, onAction: () -> Unit, onNavigate: (Int) -> Unit,
@@ -382,7 +397,6 @@ private fun Pane(
     onDragEnd: () -> Unit, onDragCancel: () -> Unit, modifier: Modifier
 ) {
     val context = LocalContext.current
-    val listState = rememberLazyListState()
     val pathScroll = rememberScrollState()
     LaunchedEffect(path, pathScroll.maxValue) { pathScroll.scrollTo(pathScroll.maxValue) }
     Column(modifier.background(paper)) {
@@ -396,15 +410,9 @@ private fun Pane(
                 fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
                 fontWeight = FontWeight.Bold, letterSpacing = 0.8.sp)
             Spacer(Modifier.width(8.dp))
-            path.firstOrNull()?.let { root ->
-                Text(root.label, color = if (isActive) Color(0xFFE6DBD0) else muted,
-                    fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.widthIn(max = 72.dp).clickable { onNavigate(root.depth) })
-            }
-            if (path.size > 1) Text(" / ", color = muted, fontSize = 11.sp)
             Row(Modifier.weight(1f).horizontalScroll(pathScroll),
                 horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically) {
-                path.drop(1).forEachIndexed { index, crumb ->
+                path.forEachIndexed { index, crumb ->
                     if (index > 0) Text(" / ", color = muted, fontSize = 11.sp)
                     Text(crumb.label, color = if (isActive) Color(0xFFE6DBD0) else muted,
                         fontSize = 11.sp, maxLines = 1,

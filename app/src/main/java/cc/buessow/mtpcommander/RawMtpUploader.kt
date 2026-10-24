@@ -31,6 +31,7 @@ internal object RawMtpUploader {
     private const val INVALID_DATASET = 0xa806
     private const val TIMEOUT_MS = 15_000
     private const val DRAIN_TIMEOUT_MS = 300
+    private const val MAX_TRANSFER = 16 * 1024
     // The device may only reply to SendObject after committing a large file to flash.
     private const val SEND_OBJECT_TIMEOUT_MS = 180_000
 
@@ -145,6 +146,11 @@ internal object RawMtpUploader {
             existing += file.name
             Log.i("AndroidMTP", "Raw MTP uploaded ${file.name} ($size bytes) in ${elapsed()}")
             return handle
+        }
+
+        /** Forgets [name] after it was deleted through another session, so it can be uploaded again. */
+        fun forget(storageId: Int, parent: Int, name: String) {
+            names[storageId to parent]?.remove(name)
         }
 
         override fun close() {
@@ -365,11 +371,19 @@ internal object RawMtpUploader {
             }
         }
 
+        // Synchronous transfers: a timed-out UsbRequest stays queued in the kernel after close()
+        // and the next requestWait() then reaps freed memory, crashing the process.
+        // Each one is capped at usbfs' classic 16 KB, the size Android's own MtpDevice uses; larger reads failed
+        // at once with -1 and left the watch's reply unread. Callers loop until a container is complete.
         private fun transfer(endpoint: UsbEndpoint, data: ByteArray, offset: Int,
-            length: Int, timeoutMs: Int = TIMEOUT_MS): Int =
-            // Synchronous transfers: a timed-out UsbRequest stays queued in the kernel after close()
-            // and the next requestWait() then reaps freed memory, crashing the process.
-            connection.bulkTransfer(endpoint, data, offset, length, timeoutMs)
+            length: Int, timeoutMs: Int = TIMEOUT_MS): Int {
+            val started = System.currentTimeMillis()
+            val count = connection.bulkTransfer(endpoint, data, offset, minOf(length, MAX_TRANSFER), timeoutMs)
+            if (count < 0 && timeoutMs != DRAIN_TIMEOUT_MS) Log.w("AndroidMTP", "MTP bulk " +
+                "${if (endpoint == input) "read" else "write"} of ${minOf(length, MAX_TRANSFER)} bytes failed " +
+                "after ${System.currentTimeMillis() - started} ms")
+            return count
+        }
 
         private fun header(length: Int, type: Int, code: Int, transaction: Int,
             capacity: Int = 12): ByteBuffer =

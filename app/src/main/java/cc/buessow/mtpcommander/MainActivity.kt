@@ -25,14 +25,23 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Checkbox
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import cc.buessow.mtpcommander.ui.theme.AndroidMTPTheme
 import com.google.android.gms.common.api.ApiException
 import com.google.android.gms.common.api.CommonStatusCodes
 import java.io.File
 import java.io.FileOutputStream
+import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 
@@ -44,6 +53,10 @@ private data class FileEntry(val handle: Int, val name: String, val directory: B
 private data class Folder(val handle: Int, val name: String)
 private enum class Source { DEVICES, PHONE, MTP, DRIVE }
 private val DRIVE_ROOT = DriveFolder(DriveClient.ROOT, "My Drive")
+private enum class Overwrite { REPLACE, SKIP, STOP }
+/** A copy waiting on the worker until the user decides about an item that already exists; the flag means "for all". */
+private class OverwritePrompt(val name: String, val folder: Boolean, val destination: String, val drive: Boolean,
+    val more: Boolean, val answer: CompletableFuture<Pair<Overwrite, Boolean>>)
 private data class PaneState(
     val source: Source = Source.DEVICES,
     val deviceName: String? = null,
@@ -99,6 +112,7 @@ class MainActivity : ComponentActivity() {
     private var panes by mutableStateOf(listOf(PaneState(), PaneState()))
     private var activePane by mutableStateOf(0)
     private var showPhoneAccessExplanation by mutableStateOf(false)
+    private var overwritePrompt by mutableStateOf<OverwritePrompt?>(null)
     private var mode by mutableStateOf(CommanderMode.NONE)
     // In delete mode this pane shows the trash; items are dragged into it from the other pane.
     private var trashPane by mutableStateOf(1)
@@ -186,9 +200,42 @@ class MainActivity : ComponentActivity() {
                     onDropHit = ::dropSearchHit,
                     onCursor = { index, id -> update(index) { it.copy(cursor = id) } }
                 )
+                overwritePrompt?.let { OverwriteDialog(it) }
             }
         }
         refreshDevices()
+    }
+
+    @androidx.compose.runtime.Composable
+    private fun OverwriteDialog(prompt: OverwritePrompt) {
+        var all by remember(prompt) { mutableStateOf(false) }
+        fun answer(choice: Overwrite) {
+            overwritePrompt = null
+            prompt.answer.complete(choice to all)
+        }
+        AlertDialog(
+            onDismissRequest = { answer(Overwrite.SKIP) },
+            title = { Text("${prompt.name} already exists") },
+            text = {
+                Column {
+                    Text((if (prompt.folder) "Replace the folder in ${prompt.destination} and everything in it?"
+                        else "Replace the file in ${prompt.destination}?") +
+                        if (prompt.drive) " The existing one is moved to Google Drive's trash."
+                        else " The existing one is deleted.")
+                    if (prompt.more) Row(verticalAlignment = Alignment.CenterVertically) {
+                        Checkbox(checked = all, onCheckedChange = { all = it })
+                        Text("Do the same for the remaining items")
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = { answer(Overwrite.REPLACE) }) { Text("Replace") } },
+            dismissButton = {
+                Row {
+                    TextButton(onClick = { answer(Overwrite.STOP) }) { Text("Stop") }
+                    TextButton(onClick = { answer(Overwrite.SKIP) }) { Text("Skip") }
+                }
+            }
+        )
     }
 
     override fun onResume() {
@@ -837,28 +884,40 @@ class MainActivity : ComponentActivity() {
             update(sourceIndex) { it.copy(status = "Direct MTP-to-MTP copy is unavailable; copy to phone first.") }; return
         }
         if (items.isEmpty()) return
+        val destinationLabel = paneData(targetIndex, destination).path.last().label
         val sourceEpoch = source.deviceName?.let { epochs[it] }
         val targetEpoch = destination.deviceName?.let { epochs[it] }
         update(sourceIndex) { it.copy(busy = true, status = "Copy in progress…") }
         update(targetIndex) { it.copy(busy = true, status = "Copy in progress…") }
         worker.execute {
             var done = 0
+            var skipped = 0
             var failure: String? = null
             var driveFailure: Exception? = null
-            for (item in items) {
+            var always: Overwrite? = null
+            for ((position, item) in items.withIndex()) {
                 try {
                     check(source.deviceName == null || sourceEpoch == epochs[source.deviceName]) { "Source disconnected" }
                     check(destination.deviceName == null || targetEpoch == epochs[destination.deviceName]) {
                         "Destination disconnected"
                     }
+                    checkCopyable(source, destination, item)
+                    if (existsAt(destination, item.name)) {
+                        val choice = always ?: askOverwrite(item, destination, destinationLabel,
+                            more = position < items.size - 1).let { (choice, all) -> if (all) always = choice; choice }
+                        if (choice == Overwrite.SKIP) { skipped++; continue }
+                        if (choice == Overwrite.STOP) { failure = "${item.name} already exists"; break }
+                        removeAt(destination, item.name)
+                    }
                     var lastReport = 0L
+                    var stage = "Copying"
                     val position = if (items.size > 1) " (${done + 1}/${items.size})" else ""
-                    copyEntry(source, destination, item) { copied, total ->
+                    copyEntry(source, destination, item, onStage = { stage = it; lastReport = 0 }) { copied, total ->
                         val now = System.currentTimeMillis()
                         if (copied == total || now - lastReport >= 200) {
                             lastReport = now
                             val fraction = if (total > 0) copied.toFloat() / total else null
-                            val status = "Copying ${item.name}$position: ${Formatter.formatShortFileSize(this, copied)}" +
+                            val status = "$stage ${item.name}$position: ${Formatter.formatShortFileSize(this, copied)}" +
                                 " / ${Formatter.formatShortFileSize(this, total)}" +
                                 (fraction?.let { " · ${(it * 100).toInt()}%" } ?: "")
                             runOnUiThread {
@@ -878,10 +937,63 @@ class MainActivity : ComponentActivity() {
             destination.deviceName?.let(::endRawSession)
             runOnUiThread {
                 if (isDestroyed) return@runOnUiThread
-                val progress = "$done/${items.size} copied"
-                driveFailure?.let { failure = "${driveError(it)} (${items[done].name})" }
+                val progress = "$done/${items.size} copied" + if (skipped > 0) ", $skipped skipped" else ""
+                driveFailure?.let { failure = "${driveError(it)} (${items[done + skipped].name})" }
                 finishPaneAction(sourceIndex, targetIndex, failure?.let { "Stopped: $it · $progress" } ?: progress)
             }
+        }
+    }
+
+    /** On the worker: asks on screen whether to replace [item] and waits for the answer. */
+    private fun askOverwrite(item: CommanderItem, destination: PaneState, label: String,
+        more: Boolean): Pair<Overwrite, Boolean> {
+        val answer = CompletableFuture<Pair<Overwrite, Boolean>>()
+        runOnUiThread {
+            if (isDestroyed) answer.complete(Overwrite.STOP to false)
+            else overwritePrompt = OverwritePrompt(item.name, item.directory, label,
+                destination.source == Source.DRIVE, more, answer)
+        }
+        return answer.get()
+    }
+
+    /** Rejects copies that cannot work before anything existing at the destination is replaced. */
+    private fun checkCopyable(source: PaneState, destination: PaneState, item: CommanderItem) {
+        if (item.directory) {
+            check(source.source != Source.MTP && destination.source != Source.MTP) {
+                "MTP folder copy is not supported; select files individually"
+            }
+            check(source.source != Source.DRIVE || destination.source != Source.DRIVE) {
+                "Google Drive cannot copy folders; copy through the phone"
+            }
+        }
+        if (source.source == Source.DRIVE && destination.source != Source.DRIVE)
+            check(driveFile(item).copyable) { "${item.name} is a Google document without file content" }
+    }
+
+    /** On the worker: whether the destination folder already holds something called [name]. */
+    private fun existsAt(target: PaneState, name: String): Boolean = when (target.source) {
+        Source.PHONE -> File(target.phoneFolders.last(), name).exists()
+        Source.MTP -> mtpExists(target, name)
+        Source.DRIVE -> drive.exists(target.driveFolders.last().id, name)
+        Source.DEVICES -> false
+    }
+
+    /** On the worker: deletes, or for Drive trashes, everything called [name] in the destination folder. */
+    private fun removeAt(target: PaneState, name: String) {
+        when (target.source) {
+            Source.PHONE -> File(target.phoneFolders.last(), name).let { file ->
+                deleteEntry(target, CommanderItem(file.path, name, file.isDirectory, -1, 0))
+            }
+            Source.MTP -> {
+                val deviceName = target.deviceName ?: error("MTP device disconnected")
+                val parent = target.folders.lastOrNull()?.handle ?: -1
+                mtpHandles(deviceName, target.storage!!.id, parent)
+                    .filter { sessions[deviceName]?.getObjectInfo(it)?.name == name }
+                    .forEach { deleteEntry(target, CommanderItem(it.toString(), name, false, -1, 0)) }
+                rawSessions[deviceName]?.forget(target.storage.id, parent, name)
+            }
+            Source.DRIVE -> drive.find(target.driveFolders.last().id, name).forEach { drive.trash(it.id) }
+            Source.DEVICES -> Unit
         }
     }
 
@@ -1016,8 +1128,9 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    /** [onStage] names the current step when a copy has to pass through a temporary file. */
     private fun copyEntry(source: PaneState, target: PaneState, item: CommanderItem,
-        onProgress: (Long, Long) -> Unit = { _, _ -> }) {
+        onStage: (String) -> Unit = {}, onProgress: (Long, Long) -> Unit = { _, _ -> }) {
         check(source.source != target.source || source.source != Source.PHONE ||
             source.phoneFolders.last() != target.phoneFolders.last()) { "Source and destination are the same folder" }
         check(source.source != target.source || source.source != Source.DRIVE ||
@@ -1059,11 +1172,15 @@ class MainActivity : ComponentActivity() {
                     if (source.source == Source.DRIVE) {
                         val file = driveFile(item)
                         check(!file.folder) { "MTP folder copy is not supported; select files individually" }
+                        onStage("Step 1/2, downloading")
                         downloadDrive(file, temp, onProgress)
+                        onStage("Step 2/2, copying to device")
                         uploadMtp(target, temp, onProgress)
                     } else {
                         check(!drive.exists(target.driveFolders.last().id, item.name)) { "Destination already exists" }
+                        onStage("Step 1/2, reading from device")
                         downloadMtp(source, item, temp, onProgress)
+                        onStage("Step 2/2, uploading")
                         uploadDrive(target, temp, onProgress)
                     }
                 } finally { staging.deleteRecursively() }
@@ -1203,6 +1320,8 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        // A copy waiting for an answer would otherwise block the worker forever.
+        overwritePrompt?.answer?.complete(Overwrite.STOP to false)
         unregisterReceiver(usbReceiver)
         (readyDevices + panes.mapNotNull { it.deviceName }).forEach(::bumpEpoch)
         worker.execute {

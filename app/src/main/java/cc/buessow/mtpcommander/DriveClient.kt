@@ -40,8 +40,10 @@ internal class DriveClient(private val context: Context) {
 
     fun list(folderId: String): List<DriveFile> = query("'${escape(folderId)}' in parents and trashed = false")
 
-    fun exists(folderId: String, name: String) =
-        query("'${escape(folderId)}' in parents and name = '${escape(name)}' and trashed = false").isNotEmpty()
+    fun find(folderId: String, name: String): List<DriveFile> =
+        query("'${escape(folderId)}' in parents and name = '${escape(name)}' and trashed = false")
+
+    fun exists(folderId: String, name: String) = find(folderId, name).isNotEmpty()
 
     fun download(id: String, to: File, onProgress: (Long, Long) -> Unit) {
         val connection = open("$API/files/${encode(id)}?alt=media&supportsAllDrives=true", "GET")
