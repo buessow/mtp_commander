@@ -18,11 +18,13 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -56,15 +58,19 @@ internal data class CommanderCrumb(val label: String, val depth: Int)
 internal data class CommanderPane(
     val title: String, val path: List<CommanderCrumb>, val entries: List<CommanderItem>,
     val status: String, val busy: Boolean, val canBack: Boolean,
-    val actionLabel: String, val navigationKey: String
+    val actionLabel: String, val navigationKey: String,
+    val selectedIds: Set<String> = emptySet(), val cursor: String? = null
 )
 
+internal enum class FileAction { COPY, RENAME, DELETE, MKDIR }
+internal data class ActionPrompt(val action: FileAction, val title: String, val message: String, val initialName: String = "")
+
 private val paper = Color(0xFFF5F0E8)
-private val ink = Color(0xFF282725)
+private val ink = Color(0xFF2C455D)
 private val muted = Color(0xFF77716A)
 private val divider = Color(0xFFD9D0C6)
 private val accent = Color(0xFFA75030)
-private val active = Color(0xFF302923)
+private val active = Color(0xFF2C455D)
 private val selected = Color(0xFFF0DCC9)
 private val heading = FontFamily.SansSerif
 
@@ -74,9 +80,21 @@ internal fun CommanderScreen(
     onOpen: (Int, CommanderItem) -> Unit,
     onNavigate: (Int, Int) -> Unit, onAction: (Int) -> Unit, onRefresh: () -> Unit,
     showPhoneAccessExplanation: Boolean, onConfirmPhoneAccess: () -> Unit,
-    onDismissPhoneAccess: () -> Unit
+    onDismissPhoneAccess: () -> Unit, prompt: ActionPrompt?, onDismissPrompt: () -> Unit,
+    onConfirmPrompt: (String) -> Unit, onFileAction: (FileAction) -> Unit,
+    onToggle: (Int, String) -> Unit, onSelectAll: () -> Unit, onCursor: (Int, String) -> Unit
 ) {
-    // Selection is local decoration only. It never authorizes an operation.
+    var input by remember(prompt) { mutableStateOf(prompt?.initialName.orEmpty()) }
+    if (prompt != null) AlertDialog(
+        onDismissRequest = onDismissPrompt, title = { Text(prompt.title) },
+        text = { Column {
+            Text(prompt.message)
+            if (prompt.action == FileAction.RENAME || prompt.action == FileAction.MKDIR)
+                OutlinedTextField(value = input, onValueChange = { input = it }, label = { Text("Name") }, singleLine = true)
+        } },
+        confirmButton = { TextButton(onClick = { onConfirmPrompt(input) }) { Text("Confirm") } },
+        dismissButton = { TextButton(onClick = onDismissPrompt) { Text("Cancel") } }
+    )
     if (showPhoneAccessExplanation) {
         AlertDialog(
             onDismissRequest = onDismissPhoneAccess,
@@ -102,6 +120,7 @@ internal fun CommanderScreen(
             listOf("Copy" to "▣", "Rename" to "✎", "Delete" to "×", "MkDir" to "+", "Select" to "☑")
                 .forEachIndexed { index, (label, icon) ->
                     Column(Modifier.weight(1f).height(56.dp)
+                        .clickable { if (index == 4) onSelectAll() else onFileAction(FileAction.entries[index]) }
                         .then(if (index < 4) Modifier.border(BorderStroke(0.5.dp, divider)) else Modifier),
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.Center) {
@@ -115,6 +134,8 @@ internal fun CommanderScreen(
             Pane(
                 title = panes[0].title, symbol = "▯", path = panes[0].path,
                 entries = panes[0].entries, isActive = activePane == 0, isBusy = panes[0].busy,
+                selectedIds = panes[0].selectedIds, cursor = panes[0].cursor,
+                onToggle = { onToggle(0, it) }, onCursor = { onCursor(0, it) },
                 emptyMessage = panes[0].status,
                 actionLabel = panes[0].actionLabel, onAction = { onAction(0) },
                 onNavigate = { depth -> onActivate(0); onNavigate(0, depth) },
@@ -133,6 +154,8 @@ internal fun CommanderScreen(
             Pane(
                 title = panes[1].title, symbol = "◉", path = panes[1].path,
                 entries = panes[1].entries, isActive = activePane == 1, isBusy = panes[1].busy,
+                selectedIds = panes[1].selectedIds, cursor = panes[1].cursor,
+                onToggle = { onToggle(1, it) }, onCursor = { onCursor(1, it) },
                 emptyMessage = panes[1].status,
                 actionLabel = panes[1].actionLabel, onAction = { onAction(1) },
                 onNavigate = { depth -> onActivate(1); onNavigate(1, depth) },
@@ -140,9 +163,9 @@ internal fun CommanderScreen(
                 onActivate = { onActivate(1) }, modifier = Modifier.weight(1f)
             )
         }
-        Text("READ ONLY · ${panes[activePane].status}",
-            Modifier.fillMaxWidth().height(38.dp).padding(horizontal = 12.dp, vertical = 9.dp),
-            color = muted, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Text(panes[activePane].status,
+            Modifier.fillMaxWidth().height(44.dp).padding(horizontal = 12.dp, vertical = 5.dp),
+            color = muted, fontSize = 11.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
     }
 }
 
@@ -150,12 +173,11 @@ internal fun CommanderScreen(
 private fun Pane(
     title: String, symbol: String, path: List<CommanderCrumb>, entries: List<CommanderItem>,
     isActive: Boolean, isBusy: Boolean, emptyMessage: String,
+    selectedIds: Set<String>, cursor: String?, onToggle: (String) -> Unit, onCursor: (String) -> Unit,
     actionLabel: String, onAction: () -> Unit, onNavigate: (Int) -> Unit,
     onOpen: (CommanderItem) -> Unit, onActivate: () -> Unit, modifier: Modifier
 ) {
     val context = LocalContext.current
-    var selectedIds by remember { mutableStateOf<Set<String>>(emptySet()) }
-    var cursor by remember { mutableStateOf<String?>(null) }
     val listState = rememberLazyListState()
     val pathScroll = rememberScrollState()
     LaunchedEffect(path, pathScroll.maxValue) { pathScroll.scrollTo(pathScroll.maxValue) }
@@ -166,12 +188,19 @@ private fun Pane(
             verticalAlignment = Alignment.CenterVertically) {
             Text(symbol, color = if (isActive) paper else accent, fontSize = 17.sp)
             Spacer(Modifier.width(7.dp))
-            Text(title, color = if (isActive) paper else ink, fontSize = 15.sp,
+            Text(title, Modifier.widthIn(max = 86.dp), color = if (isActive) paper else ink,
+                fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
                 fontWeight = FontWeight.Bold, letterSpacing = 0.8.sp)
             Spacer(Modifier.width(8.dp))
+            path.firstOrNull()?.let { root ->
+                Text(root.label, color = if (isActive) Color(0xFFE6DBD0) else muted,
+                    fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.widthIn(max = 72.dp).clickable { onNavigate(root.depth) })
+            }
+            if (path.size > 1) Text(" / ", color = muted, fontSize = 11.sp)
             Row(Modifier.weight(1f).horizontalScroll(pathScroll),
                 horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically) {
-                path.forEachIndexed { index, crumb ->
+                path.drop(1).forEachIndexed { index, crumb ->
                     if (index > 0) Text(" / ", color = muted, fontSize = 11.sp)
                     Text(crumb.label, color = if (isActive) Color(0xFFE6DBD0) else muted,
                         fontSize = 11.sp, maxLines = 1,
@@ -193,9 +222,9 @@ private fun Pane(
                 val marked = item.id in selectedIds
                 Row(Modifier.fillMaxWidth().height(40.dp)
                     .background(if (isActive && cursor == item.id) selected else if (cursor == item.id) Color(0xFFEAE2D9) else paper)
-                    .clickable { cursor = item.id; onOpen(item) }, verticalAlignment = Alignment.CenterVertically) {
+                    .clickable { onCursor(item.id); onOpen(item) }, verticalAlignment = Alignment.CenterVertically) {
                     Box(Modifier.width(34.dp).height(40.dp).clickable {
-                        onActivate(); selectedIds = if (item.id in selectedIds) selectedIds - item.id else selectedIds + item.id
+                        onActivate(); onToggle(item.id)
                     },
                         contentAlignment = Alignment.Center) {
                         Box(Modifier.size(15.dp).background(if (marked) accent else paper)
@@ -233,7 +262,7 @@ private fun Pane(
             Text(if (selectedIds.isEmpty()) "${entries.size} items" else "${selectedIds.size} marked",
                 fontSize = 11.sp, color = if (selectedIds.isEmpty()) muted else accent)
             Spacer(Modifier.weight(1f))
-            Text("READ ONLY", fontSize = 10.sp, color = muted, letterSpacing = 0.5.sp)
+            Text("SELECT ITEMS TO ACT", fontSize = 10.sp, color = muted, letterSpacing = 0.5.sp)
         }
     }
 }
