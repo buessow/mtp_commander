@@ -19,8 +19,22 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
+    // Release signing comes from the environment (set by the GitHub release workflow), so local builds need no keystore.
+    val keystoreFile = System.getenv("KEYSTORE_FILE")
+    signingConfigs {
+        if (keystoreFile != null) {
+            create("release") {
+                storeFile = file(keystoreFile)
+                storePassword = System.getenv("KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("KEY_ALIAS")
+                keyPassword = System.getenv("KEY_PASSWORD")
+            }
+        }
+    }
+
     buildTypes {
         release {
+            if (keystoreFile != null) signingConfig = signingConfigs.getByName("release")
             optimization {
                 enable = true
                 packageScope = setOf("androidx.**", "kotlin.**", "kotlinx.**")

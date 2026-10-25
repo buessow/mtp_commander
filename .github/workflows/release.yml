@@ -1,0 +1,57 @@
+name: Release
+
+# Builds a signed release APK and AAB on every push to the production branch and
+# attaches them to a GitHub release tagged v<versionName>. The signing secrets live
+# in the "production" environment, which only the production branch may use.
+on:
+  push:
+    branches: [production]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Decode keystore
+        run: echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > "$RUNNER_TEMP/release.jks"
+
+      - name: Build signed release
+        run: ./gradlew assembleRelease bundleRelease
+        env:
+          KEYSTORE_FILE: ${{ runner.temp }}/release.jks
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+
+      - name: Remove keystore
+        if: always()
+        run: rm -f "$RUNNER_TEMP/release.jks"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release
+          path: |
+            app/build/outputs/apk/release/*.apk
+            app/build/outputs/bundle/release/*.aab
+
+      # Fails if the tag already exists, a reminder to bump versionName before releasing.
+      - name: Create GitHub release
+        run: |
+          version=$(sed -n 's/.*versionName = "\(.*\)".*/\1/p' app/build.gradle.kts)
+          gh release create "v$version" --target "$GITHUB_SHA" --generate-notes \
+            app/build/outputs/apk/release/*.apk app/build/outputs/bundle/release/*.aab
+        env:
+          GH_TOKEN: ${{ github.token }}
