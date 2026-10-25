@@ -1,7 +1,7 @@
 name: Release
 
 # Builds a signed release APK and AAB on every push to the production branch and
-# attaches them to a GitHub release tagged v<versionName>. The signing secrets live
+# attaches them to a GitHub release tagged v<versionName>.<run number>. The signing secrets live
 # in the "production" environment, which only the production branch may use.
 on:
   push:
@@ -31,6 +31,7 @@ jobs:
       - name: Build signed release
         run: ./gradlew assembleRelease bundleRelease
         env:
+          BUILD_NUMBER: ${{ github.run_number }}
           KEYSTORE_FILE: ${{ runner.temp }}/release.jks
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
@@ -47,11 +48,11 @@ jobs:
             app/build/outputs/apk/release/*.apk
             app/build/outputs/bundle/release/*.aab
 
-      # Fails if the tag already exists, a reminder to bump versionName before releasing.
+      # The tag matches the app's versionName: the base version in build.gradle.kts plus the run number.
       - name: Create GitHub release
         run: |
-          version=$(sed -n 's/.*versionName = "\(.*\)".*/\1/p' app/build.gradle.kts)
-          gh release create "v$version" --target "$GITHUB_SHA" --generate-notes \
+          base=$(sed -n 's/.*versionName = "\([^"]*\)".*/\1/p' app/build.gradle.kts)
+          gh release create "v$base.$GITHUB_RUN_NUMBER" --target "$GITHUB_SHA" --generate-notes \
             app/build/outputs/apk/release/*.apk app/build/outputs/bundle/release/*.aab
         env:
           GH_TOKEN: ${{ github.token }}

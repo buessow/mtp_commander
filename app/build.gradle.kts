@@ -13,8 +13,10 @@ android {
         applicationId = "cc.buessow.mtpcommander"
         minSdk = 29
         targetSdk = 37
-        versionCode = 1
-        versionName = "1.0"
+        // The release workflow passes its run number, so every production build gets a new version.
+        val buildNumber = System.getenv("BUILD_NUMBER")?.toInt()
+        versionCode = buildNumber ?: 1
+        versionName = "1.0" + (buildNumber?.let { ".$it" } ?: "")
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
