@@ -759,9 +759,10 @@ class MainActivity : ComponentActivity() {
         if (usbManager.hasPermission(device)) openDevice(device)
         else {
             pendingDeviceNames += device.deviceName
+            // No data URI: usbReceiver's filter has none, so an intent with one would never reach it. The
+            // request code keeps the pending intents of different devices apart.
             val permissionIntent = PendingIntent.getBroadcast(this, device.deviceId,
-                Intent(ACTION_USB_PERMISSION).setPackage(packageName)
-                    .setData(Uri.parse("mtp-permission:${device.deviceName}")),
+                Intent(ACTION_USB_PERMISSION).setPackage(packageName),
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE)
             try { usbManager.requestPermission(device, permissionIntent) }
             catch (e: Exception) {
