@@ -11,11 +11,14 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
@@ -91,6 +94,25 @@ internal data class CommanderPane(
 )
 
 internal enum class CommanderMode { NONE, COPY, DELETE }
+
+/** File list order; folders always come first. */
+private enum class SortKey { NAME, SIZE, DATE }
+
+private data class Sort(val key: SortKey, val descending: Boolean) {
+    fun apply(entries: List<CommanderItem>): List<CommanderItem> {
+        val byKey = when (key) {
+            SortKey.NAME -> compareBy<CommanderItem> { it.name.lowercase() }
+            SortKey.SIZE -> compareBy { it.size }
+            SortKey.DATE -> compareBy { it.modified }
+        }.thenBy { it.name.lowercase() }
+        return entries.sortedWith(compareBy<CommanderItem> { !it.directory }
+            .then(if (descending) byKey.reversed() else byKey))
+    }
+
+    /** Tapping the current column reverses it; a new column starts with names A–Z, sizes and dates largest first. */
+    fun toggle(column: SortKey) = if (column == key) copy(descending = !descending)
+        else Sort(column, descending = column != SortKey.NAME)
+}
 
 /** A search match; [folder] is its location relative to the folder the search started in. */
 internal data class SearchHit(val item: CommanderItem, val folder: String)
@@ -168,6 +190,15 @@ internal fun CommanderScreen(
     }
     var balloonHidden by remember(balloon) { mutableStateOf(balloon == null || hints.getBoolean(balloon, false)) }
     LaunchedEffect(balloon) { if (balloon != null && !balloonHidden) hints.edit().putBoolean(balloon, true).apply() }
+    val view = remember { context.getSharedPreferences("view", android.content.Context.MODE_PRIVATE) }
+    var sort by remember {
+        mutableStateOf(Sort(runCatching { SortKey.valueOf(view.getString("sort", null)!!) }.getOrDefault(SortKey.NAME),
+            view.getBoolean("descending", false)))
+    }
+    val onSort = { column: SortKey ->
+        sort = sort.toggle(column)
+        view.edit().putString("sort", sort.key.name).putBoolean("descending", sort.descending).apply()
+    }
     // Scroll positions live here, not in Pane, so they survive a pane being swapped for the basket or search box.
     val listStates = remember { mutableMapOf<String, LazyListState>() }
     listStates.keys.retainAll(panes.map { it.navigationKey }.toSet())
@@ -234,7 +265,8 @@ internal fun CommanderScreen(
                 Pane(
                     listState = listStates.getOrPut(pane.navigationKey) { LazyListState() },
                     title = pane.title, symbol = if (index == 0) "▯" else "◉", path = pane.path,
-                    entries = pane.entries, isActive = activePane == index, isBusy = pane.busy,
+                    entries = remember(pane.entries, sort) { sort.apply(pane.entries) }, sort = sort, onSort = onSort,
+                    isActive = activePane == index, isBusy = pane.busy,
                     cursor = pane.cursor, onCursor = { onCursor(index, it) }, progress = pane.progress,
                     emptyMessage = pane.status,
                     actionLabel = pane.actionLabel, onAction = { onAction(index) },
@@ -399,7 +431,7 @@ private fun Basket(copy: Boolean, entries: List<CommanderItem>, onRemove: (Strin
             Text(if (copy) "COPY LIST" else "TRASH", color = onHeader, fontSize = 15.sp, fontWeight = FontWeight.Bold,
                 letterSpacing = 0.8.sp)
             Spacer(Modifier.weight(1f))
-            Text("${entries.size} item${if (entries.size == 1) "" else "s"}", color = onHeader, fontSize = 11.sp)
+            Text(totalLabel(LocalContext.current, entries), color = onHeader, fontSize = 11.sp)
         }
         LazyColumn(Modifier.weight(1f)) {
             items(entries, key = { it.id }) { item ->
@@ -419,19 +451,32 @@ private fun Basket(copy: Boolean, entries: List<CommanderItem>, onRemove: (Strin
                     "when you press DELETE.", Modifier.padding(18.dp), color = muted, fontSize = 12.sp)
             }
         }
-        Row(Modifier.fillMaxWidth().height(44.dp)) {
-            Text("CLEAR", Modifier.width(96.dp).fillMaxSize().border(BorderStroke(0.5.dp, divider))
-                .clickable(enabled = enabled, onClick = onClear).padding(vertical = 13.dp),
-                color = if (enabled) ink else muted, fontSize = 13.sp, fontWeight = FontWeight.Bold,
-                letterSpacing = 0.8.sp, textAlign = TextAlign.Center)
-            Text(if (busy && entries.isNotEmpty()) "${if (copy) "COPYING" else "DELETING"}…" else executeLabel,
-                Modifier.weight(1f).fillMaxSize().background(if (enabled) header else divider)
-                .clickable(enabled = enabled, onClick = onExecute)
-                .padding(horizontal = 10.dp, vertical = 13.dp),
-                color = onHeader, fontSize = 13.sp, fontWeight = FontWeight.Bold, letterSpacing = 0.8.sp,
-                textAlign = TextAlign.Center, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        // Centred rather than padded to a fixed height, so larger font sizes are not cut off.
+        Row(Modifier.fillMaxWidth().height(IntrinsicSize.Min)) {
+            Box(Modifier.width(96.dp).fillMaxHeight().heightIn(min = 44.dp).border(BorderStroke(0.5.dp, divider))
+                .clickable(enabled = enabled, onClick = onClear), contentAlignment = Alignment.Center) {
+                Text("CLEAR", Modifier.padding(vertical = 8.dp), color = if (enabled) ink else muted, fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold, letterSpacing = 0.8.sp, textAlign = TextAlign.Center)
+            }
+            Box(Modifier.weight(1f).fillMaxHeight().heightIn(min = 44.dp)
+                .background(if (enabled) header else divider)
+                .clickable(enabled = enabled, onClick = onExecute), contentAlignment = Alignment.Center) {
+                Text(if (busy && entries.isNotEmpty()) "${if (copy) "COPYING" else "DELETING"}…" else executeLabel,
+                    Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                    color = onHeader, fontSize = 13.sp, fontWeight = FontWeight.Bold, letterSpacing = 0.8.sp,
+                    textAlign = TextAlign.Center, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
         }
     }
+}
+
+/** "3 items · 1.2 GB"; folder sizes are unknown until copied, so they are only counted. */
+private fun totalLabel(context: android.content.Context, entries: List<CommanderItem>): String {
+    val files = entries.filter { !it.directory && it.size >= 0 }
+    val folders = entries.count { it.directory }
+    return "${entries.size} item${if (entries.size == 1) "" else "s"}" +
+        (if (files.isNotEmpty()) " · ${Formatter.formatShortFileSize(context, files.sumOf { it.size })}" else "") +
+        (if (folders > 0 && files.isNotEmpty()) " + $folders folder${if (folders == 1) "" else "s"}" else "")
 }
 
 @Composable
@@ -444,7 +489,7 @@ private fun ItemIcon(item: CommanderItem, picked: Boolean, modifier: Modifier = 
 @Composable
 private fun Pane(
     listState: LazyListState, title: String, symbol: String, path: List<CommanderCrumb>, entries: List<CommanderItem>,
-    isActive: Boolean, isBusy: Boolean, emptyMessage: String,
+    sort: Sort, onSort: (SortKey) -> Unit, isActive: Boolean, isBusy: Boolean, emptyMessage: String,
     cursor: String?, onCursor: (String) -> Unit, progress: Float?,
     actionLabel: String, onAction: () -> Unit, onNavigate: (Int) -> Unit,
     onOpen: (CommanderItem) -> Unit, onActivate: () -> Unit, pickEnabled: Boolean, picked: Set<String>,
@@ -477,9 +522,9 @@ private fun Pane(
         Row(Modifier.fillMaxWidth().height(23.dp).border(BorderStroke(0.5.dp, divider)),
             verticalAlignment = Alignment.CenterVertically) {
             Spacer(Modifier.width(10.dp))
-            ColumnLabel("NAME", Modifier.weight(1f))
-            ColumnLabel("SIZE", Modifier.width(60.dp), TextAlign.End)
-            ColumnLabel("DATE", Modifier.width(72.dp), TextAlign.End)
+            ColumnLabel("NAME", Modifier.weight(1f), sort, SortKey.NAME, onSort)
+            ColumnLabel("SIZE", Modifier.width(60.dp), sort, SortKey.SIZE, onSort, TextAlign.End)
+            ColumnLabel("DATE", Modifier.width(72.dp), sort, SortKey.DATE, onSort, TextAlign.End)
         }
         LazyColumn(Modifier.weight(1f), state = listState) {
             items(entries, key = { it.id }) { item ->
@@ -532,7 +577,12 @@ private fun Pane(
 }
 
 @Composable
-private fun ColumnLabel(label: String, modifier: Modifier, alignment: TextAlign = TextAlign.Start) {
-    Text(label, modifier.padding(end = if (alignment == TextAlign.End) 10.dp else 0.dp),
-        fontSize = 9.sp, letterSpacing = 1.sp, color = muted, textAlign = alignment)
+private fun ColumnLabel(label: String, modifier: Modifier, sort: Sort, column: SortKey, onSort: (SortKey) -> Unit,
+    alignment: TextAlign = TextAlign.Start) {
+    val current = sort.key == column
+    Text(label + if (current) if (sort.descending) " ▼" else " ▲" else "",
+        modifier.fillMaxHeight().clickable { onSort(column) }.wrapContentHeight()
+            .padding(end = if (alignment == TextAlign.End) 10.dp else 0.dp),
+        fontSize = 9.sp, letterSpacing = 1.sp, color = if (current) accent else muted, textAlign = alignment,
+        fontWeight = if (current) FontWeight.Bold else FontWeight.Normal)
 }

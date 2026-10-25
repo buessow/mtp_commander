@@ -287,6 +287,12 @@ class MainActivity : ComponentActivity() {
         )
     }
 
+    // Android starts the app, or hands it a plugged-in Garmin while it is open, with USB access already granted.
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        if (intent.action == UsbManager.ACTION_USB_DEVICE_ATTACHED) refreshDevices()
+    }
+
     override fun onResume() {
         super.onResume()
         refreshDevices()
@@ -1117,6 +1123,8 @@ class MainActivity : ComponentActivity() {
                 if (isDestroyed) return@runOnUiThread
                 // Keep what was not deleted so it can be retried.
                 if (mode == CommanderMode.DELETE) basket = entries.drop(done) + basket
+                // Done with everything: back to browsing both panes.
+                if (done == entries.size && mode == CommanderMode.DELETE) toggleMode(CommanderMode.DELETE)
                 // Drop results that were deleted, including everything inside deleted folders.
                 val deleted = entries.take(done).map { it.item.id }.toSet()
                 searchHits = searchHits.filterNot { result -> result.hit.item.id in deleted ||
@@ -1204,6 +1212,8 @@ class MainActivity : ComponentActivity() {
                 if (isDestroyed) return@runOnUiThread
                 val progress = "$done/${entries.size} copied" + if (skipped > 0) ", $skipped skipped" else ""
                 driveFailure?.let { failure = "${driveError(it)} (${entries[done + skipped].item.name})" }
+                // Done with everything: back to browsing both panes; after a failure the rest stays to retry.
+                if (failure == null && mode == CommanderMode.COPY) toggleMode(CommanderMode.COPY)
                 finishPaneAction(targetIndex, shownIndex, failure?.let { "Stopped: $it · $progress" } ?: progress)
             }
         }

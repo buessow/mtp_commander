@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Garmin devices. Handling their attach makes Android ask for MTP Commander instead of opening the watch in its own
+     MTP service, which talks to the watch at the same time and leaves it unresponsive. -->
+<resources>
+    <usb-device vendor-id="2334" />
+</resources>
