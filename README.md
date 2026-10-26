@@ -78,3 +78,8 @@ attaches them to a GitHub release.
 
 The Play Store listing is in [`fastlane/metadata/android`](fastlane/metadata/android); the website and privacy policy are
 in [`docs/`](docs).
+
+## License
+
+The code is licensed under the [Apache License 2.0](LICENSE). The name "MTP Commander" and the app icon are not: if
+you publish a modified version, give it your own name and icon. See [`NOTICE`](NOTICE).

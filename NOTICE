@@ -1,0 +1,16 @@
+MTP Commander
+Copyright 2026 buessow (https://github.com/buessow/mtp_commander)
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+Name and logo
+-------------
+The name "MTP Commander" and the MTP Commander logo and app icon are not
+licensed under the Apache License; as its section 6 says, it grants no rights
+to them. The logo and icon are the launcher icon resources in
+app/src/main/res (ic_launcher*), fastlane/metadata/android/en-US/images/icon.png
+and docs/images/icon.png.
+
+You may say that your work is based on MTP Commander, but if you distribute a
+modified version or publish the app in a store, give it a different name and
+icon so it can't be mistaken for the original.
