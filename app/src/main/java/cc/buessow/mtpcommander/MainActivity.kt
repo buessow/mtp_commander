@@ -8,6 +8,7 @@ import android.content.IntentFilter
 import android.hardware.usb.UsbConstants
 import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbDeviceConnection
+import android.hardware.usb.UsbInterface
 import android.hardware.usb.UsbManager
 import android.mtp.MtpConstants
 import android.mtp.MtpDevice
@@ -625,10 +626,17 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    /**
+     * Interfaces of the configuration Android activates, its first. Some cameras offer mass storage first and PTP
+     * second; opening such a camera over MTP takes it from the kernel and unmounts its card.
+     */
+    private fun activeInterfaces(device: UsbDevice): List<UsbInterface> =
+        if (device.configurationCount == 0) (0 until device.interfaceCount).map(device::getInterface)
+        else device.getConfiguration(0).let { config -> (0 until config.interfaceCount).map(config::getInterface) }
+
     private fun refreshDevices() {
         devices = usbManager.deviceList.values.filter { device ->
-            (0 until device.interfaceCount).any {
-                val usbInterface = device.getInterface(it)
+            activeInterfaces(device).any { usbInterface ->
                 usbInterface.interfaceClass == UsbConstants.USB_CLASS_STILL_IMAGE ||
                     usbInterface.name?.contains("MTP", ignoreCase = true) == true
             }
@@ -641,7 +649,7 @@ class MainActivity : ComponentActivity() {
             .filter { it !in connected }.toSet()
         missing.forEach(::disconnect)
         massStorageCount = usbManager.deviceList.values.count { device ->
-            (0 until device.interfaceCount).any { device.getInterface(it).interfaceClass == UsbConstants.USB_CLASS_MASS_STORAGE }
+            activeInterfaces(device).any { it.interfaceClass == UsbConstants.USB_CLASS_MASS_STORAGE }
         }
         refreshDrives()
     }
