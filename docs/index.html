@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MTP Commander</title>
+<meta name="description" content="Two-pane Android file manager for Garmin watches, cameras, USB drives and Google Drive.">
+<link rel="icon" href="images/icon.png">
+<style>
+  :root {
+    --bg: #f5f0e8;
+    --surface: #fbf8f3;
+    --ink: #2c455d;
+    --text: #2c3440;
+    --muted: #6b6f75;
+    --accent: #a6512f;
+    --line: #ddd5c8;
+    --pane: #94bce3;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #161c23;
+      --surface: #1e2630;
+      --ink: #b9d3ec;
+      --text: #e3e6ea;
+      --muted: #9aa3ad;
+      --accent: #e08a62;
+      --line: #2f3a46;
+      --pane: #4f7aa3;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 17px/1.6 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  main { max-width: 860px; margin: 0 auto; padding: 0 16px 64px; }
+  header { display: flex; align-items: center; gap: 20px; padding: 48px 0 16px; }
+  header img { width: 88px; height: 88px; border-radius: 22px; flex: none; }
+  h1 { margin: 0; color: var(--ink); font-size: 2.2rem; letter-spacing: -0.02em; line-height: 1.1; }
+  .tagline { margin: 6px 0 0; color: var(--muted); }
+  h2 { color: var(--ink); margin: 48px 0 12px; font-size: 1.4rem; }
+  h3 { color: var(--ink); margin: 28px 0 6px; font-size: 1.05rem; }
+  a { color: var(--accent); }
+  code { background: var(--surface); border: 1px solid var(--line); border-radius: 4px; padding: 1px 5px; font-size: 0.9em; }
+  .shots { display: flex; gap: 16px; overflow-x: auto; padding: 8px 0 12px; scroll-snap-type: x mandatory; }
+  figure { margin: 0; flex: 1 0 180px; scroll-snap-align: start; }
+  figure img { width: 100%; border-radius: 12px; border: 1px solid var(--line); display: block; }
+  figcaption { color: var(--muted); font-size: 0.85rem; margin-top: 6px; }
+  .facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin-top: 12px; }
+  .fact { background: var(--surface); border: 1px solid var(--line); border-left: 4px solid var(--pane); border-radius: 8px; padding: 12px 16px; }
+  .fact strong { display: block; color: var(--ink); }
+  ol.steps { padding-left: 1.4em; }
+  ol.steps li { margin: 6px 0; }
+  .button { font-weight: 600; letter-spacing: 0.03em; font-size: 0.9em; color: var(--ink); }
+  footer { margin-top: 64px; padding-top: 16px; border-top: 1px solid var(--line); color: var(--muted); font-size: 0.9rem; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <img src="images/icon.png" alt="">
+    <div>
+      <h1>MTP Commander</h1>
+      <p class="tagline">A two-pane file manager for the devices you plug into your Android phone.</p>
+    </div>
+  </header>
+
+  <p>Copy maps, courses, workouts, music and photos between your phone, Garmin watches, cameras, USB drives and your
+    own Google Drive. Pick files into a list, check the total, and press one button. Nothing is copied or deleted
+    before that.</p>
+
+  <div class="shots">
+    <figure><img src="images/two_panes.png" alt="Phone folder above, Garmin watch below" loading="lazy"><figcaption>Phone and watch side by side</figcaption></figure>
+    <figure><img src="images/copy_list.png" alt="Four files in the copy list, 49 MB" loading="lazy"><figcaption>Collect files, then copy</figcaption></figure>
+    <figure><img src="images/search.png" alt="Search results for *.gpx" loading="lazy"><figcaption>Search every subfolder</figcaption></figure>
+    <figure><img src="images/trash.png" alt="Four files in the trash list" loading="lazy"><figcaption>Delete only on confirm</figcaption></figure>
+  </div>
+
+  <div class="facts">
+    <div class="fact"><strong>Requires</strong>Android 10 or later with USB host (OTG) support</div>
+    <div class="fact"><strong>Connects to</strong>MTP and PTP devices, USB drives, Google Drive</div>
+    <div class="fact"><strong>Private</strong>No accounts, ads or analytics. <a href="privacy">Privacy policy</a></div>
+  </div>
+
+  <h2>Getting started</h2>
+  <ol class="steps">
+    <li>Plug the device into your phone's USB port, directly or with a USB-C/OTG adapter, and open MTP Commander.</li>
+    <li>Both panes start on <strong>Devices</strong>. Tap the phone, a device or Google Drive to open it in that pane.</li>
+    <li>Tap a pane's header to select it. The selected pane has the dark header; the buttons at the top act on it.</li>
+  </ol>
+
+  <h3>Opening devices</h3>
+  <ul>
+    <li><strong>Garmin watches and other MTP devices</strong> ask for USB access the first time. Watches show up by their model name.</li>
+    <li><strong>USB drives and cameras in mass storage mode</strong> appear as <em>USB drive · tap to allow access</em>.
+      Tap it, then press <em>Use this folder</em> in Android's folder picker. The app remembers the drive.</li>
+    <li><strong>Google Drive</strong> asks for access to your Google account. The app only sees files and folders it
+      created itself, so start with <span class="button">NEW FOLDER</span>.</li>
+  </ul>
+
+  <h2>Copying files</h2>
+  <ol class="steps">
+    <li>Open the source folder in one pane and the destination folder in the other.</li>
+    <li>Select the source pane and press <span class="button">COPY</span>. The other pane becomes the copy list.</li>
+    <li>Tap files to add them; tap again to take them out. Hold a file to add the whole folder. The list shows the item
+      count and total size.</li>
+    <li>Press <span class="button">COPY n ITEMS TO …</span>. Files go into the folder the other pane was showing, with
+      progress shown at the bottom. If a file already exists, the app asks before overwriting it.</li>
+  </ol>
+
+  <h2>Deleting files</h2>
+  <p>Press <span class="button">DELETE</span> and add files the same way. Nothing is deleted until you press
+    <span class="button">DELETE n ITEMS</span>. Google Drive files go to Drive's trash, where you can restore them.</p>
+
+  <h2>Searching</h2>
+  <p>Press <span class="button">SEARCH</span> to search every subfolder of the selected pane's folder. Plain text
+    matches any part of a name. <code>*</code> stands for any characters and <code>?</code> for one, so
+    <code>*.fit</code> finds all FIT files. Case is ignored. With <span class="button">COPY</span> or
+    <span class="button">DELETE</span> on, tap results to add them to the list.</p>
+
+  <h2>More</h2>
+  <ul>
+    <li><span class="button">NEW FOLDER</span> creates a folder in the selected pane's folder.</li>
+    <li>Tap the <em>Name</em>, <em>Size</em> or <em>Date</em> column header to sort by it.</li>
+    <li>Tap a folder in the path at the top of a pane to jump back to it.</li>
+  </ul>
+
+  <h2>Download and source</h2>
+  <p>Signed APKs are attached to each <a href="https://github.com/buessow/mtp_commander/releases">GitHub release</a>.
+    The source code and build instructions are on
+    <a href="https://github.com/buessow/mtp_commander">GitHub</a>.</p>
+
+  <footer>
+    MTP Commander is an independent app and is not affiliated with or endorsed by Garmin Ltd. ·
+    <a href="privacy">Privacy policy</a> · Contact: <a href="mailto:rb.codecraft@gmail.com">rb.codecraft@gmail.com</a>
+  </footer>
+</main>
+</body>
+</html>
