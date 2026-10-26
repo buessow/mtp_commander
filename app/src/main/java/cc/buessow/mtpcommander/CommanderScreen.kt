@@ -91,7 +91,7 @@ internal data class CommanderPane(
     val title: String, val path: List<CommanderCrumb>, val entries: List<CommanderItem>,
     val status: String, val busy: Boolean, val canBack: Boolean,
     val actionLabel: String, val navigationKey: String,
-    val cursor: String? = null, val pickable: Boolean = false, val progress: Float? = null
+    val pickable: Boolean = false, val progress: Float? = null
 )
 
 internal enum class CommanderMode { NONE, COPY, DELETE }
@@ -129,17 +129,15 @@ internal data class NewFolderState(val active: Boolean, val target: Int, val nam
 /** Screen colours; [onActive] and [onAccent] are for text on the active and accent backgrounds. */
 private class Palette(val paper: Color, val ink: Color, val muted: Color, val divider: Color, val accent: Color,
     val active: Color, val onActive: Color, val onActiveDetail: Color, val onAccent: Color,
-    val selected: Color, val cursor: Color)
+    val selected: Color)
 
 private val LightPalette = Palette(paper = Color(0xFFF5F0E8), ink = Color(0xFF2C455D), muted = Color(0xFF77716A),
     divider = Color(0xFFD9D0C6), accent = Color(0xFFA75030), active = Color(0xFF2C455D), onActive = Color(0xFFF5F0E8),
-    onActiveDetail = Color(0xFFE6DBD0), onAccent = Color(0xFFF5F0E8), selected = Color(0xFFF0DCC9),
-    cursor = Color(0xFFEAE2D9))
+    onActiveDetail = Color(0xFFE6DBD0), onAccent = Color(0xFFF5F0E8), selected = Color(0xFFF0DCC9))
 
 private val DarkPalette = Palette(paper = Color(0xFF1B1A18), ink = Color(0xFFE4DDD3), muted = Color(0xFF9A938B),
     divider = Color(0xFF3A3632), accent = Color(0xFFE0875F), active = Color(0xFF34506A), onActive = Color(0xFFF2ECE4),
-    onActiveDetail = Color(0xFFC3CFDA), onAccent = Color(0xFF1B1A18), selected = Color(0xFF4A3B30),
-    cursor = Color(0xFF2C2926))
+    onActiveDetail = Color(0xFFC3CFDA), onAccent = Color(0xFF1B1A18), selected = Color(0xFF4A3B30))
 
 private val LocalPalette = staticCompositionLocalOf { LightPalette }
 
@@ -160,7 +158,6 @@ private val onActive: Color @Composable @ReadOnlyComposable get() = LocalPalette
 private val onActiveDetail: Color @Composable @ReadOnlyComposable get() = LocalPalette.current.onActiveDetail
 private val onAccent: Color @Composable @ReadOnlyComposable get() = LocalPalette.current.onAccent
 private val selected: Color @Composable @ReadOnlyComposable get() = LocalPalette.current.selected
-private val cursorBackground: Color @Composable @ReadOnlyComposable get() = LocalPalette.current.cursor
 private val heading = FontFamily.SansSerif
 
 @Composable
@@ -175,7 +172,7 @@ internal fun CommanderScreen(
     onExecute: () -> Unit, onClear: () -> Unit, executeLabel: String, basketBusy: Boolean,
     search: SearchState, onSearchToggle: () -> Unit, onSearchQuery: (String) -> Unit, onSearch: () -> Unit,
     onPickHit: (String) -> Unit, newFolder: NewFolderState, onNewFolderToggle: () -> Unit,
-    onNewFolderName: (String) -> Unit, onCreateFolder: () -> Unit, onCursor: (Int, String) -> Unit
+    onNewFolderName: (String) -> Unit, onCreateFolder: () -> Unit
 ) {
     val density = LocalDensity.current
     val buttonBounds = remember { mutableStateListOf(Rect.Zero, Rect.Zero, Rect.Zero, Rect.Zero) }
@@ -267,8 +264,7 @@ internal fun CommanderScreen(
                 listState = listStates.getOrPut(pane.navigationKey) { LazyListState() },
                 title = pane.title, symbol = if (index == 0) "▯" else "◉", path = pane.path,
                 entries = remember(pane.entries, sort) { sort.apply(pane.entries) }, sort = sort, onSort = onSort,
-                isActive = activePane == index, isBusy = pane.busy,
-                cursor = pane.cursor, onCursor = { onCursor(index, it) }, progress = pane.progress,
+                isActive = activePane == index, isBusy = pane.busy, progress = pane.progress,
                 emptyMessage = pane.status,
                 actionLabel = pane.actionLabel, onAction = { onAction(index) },
                 onNavigate = { depth -> onActivate(index); onNavigate(index, depth) },
@@ -519,8 +515,7 @@ private fun ItemIcon(item: CommanderItem, picked: Boolean, modifier: Modifier = 
 @Composable
 private fun Pane(
     listState: LazyListState, title: String, symbol: String, path: List<CommanderCrumb>, entries: List<CommanderItem>,
-    sort: Sort, onSort: (SortKey) -> Unit, isActive: Boolean, isBusy: Boolean, emptyMessage: String,
-    cursor: String?, onCursor: (String) -> Unit, progress: Float?,
+    sort: Sort, onSort: (SortKey) -> Unit, isActive: Boolean, isBusy: Boolean, emptyMessage: String, progress: Float?,
     actionLabel: String, onAction: () -> Unit, onNavigate: (Int) -> Unit,
     onOpen: (CommanderItem) -> Unit, onActivate: () -> Unit, pickEnabled: Boolean, picked: Set<String>,
     onPick: (List<CommanderItem>) -> Unit, modifier: Modifier
@@ -561,12 +556,10 @@ private fun Pane(
                 val isPicked = pickEnabled && item.id in picked
                 // While picking, a tap picks a file and opens a folder; a hold picks everything in the folder.
                 Row(Modifier.fillMaxWidth().height(40.dp)
-                    .background(if (isPicked || isActive && cursor == item.id) selected
-                        else if (cursor == item.id) cursorBackground else paper)
+                    .background(if (isPicked) selected else paper)
                     .combinedClickable(
                         onLongClick = if (pickEnabled) ({ onPick(entries) }) else null,
                         onClick = {
-                            onCursor(item.id)
                             if (pickEnabled && !item.directory) onPick(listOf(item)) else onOpen(item)
                         }), verticalAlignment = Alignment.CenterVertically) {
                     // The icon is a separate target so folders can be picked without opening them.

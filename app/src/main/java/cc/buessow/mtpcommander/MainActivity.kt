@@ -76,7 +76,6 @@ private data class PaneState(
     val entries: List<CommanderItem> = emptyList(),
     val status: String = "Select a device to browse.",
     val busy: Boolean = false,
-    val cursor: String? = null,
     val progress: Float? = null,
     val revision: Int = 0
 )
@@ -247,8 +246,7 @@ class MainActivity : ComponentActivity() {
                     newFolder = NewFolderState(newFolderOn, newFolderPane, newFolderName,
                         paneData(newFolderPane, panes[newFolderPane]).path.joinToString(" / ") { it.label }),
                     onNewFolderToggle = ::toggleNewFolder, onNewFolderName = { newFolderName = it },
-                    onCreateFolder = ::createFolder,
-                    onCursor = { index, id -> update(index) { it.copy(cursor = id) } }
+                    onCreateFolder = ::createFolder
                 )
                 overwritePrompt?.let { OverwriteDialog(it) }
             } }
@@ -367,7 +365,7 @@ class MainActivity : ComponentActivity() {
                 pane.source == Source.MTP && pane.storage != null,
             actionLabel = if (pane.source == Source.PHONE && !phoneAccess()) "Grant all-files access" else "Refresh",
             navigationKey = "$index:${pane.source}:${pane.deviceName}:${pane.storage?.id}:${pane.folders.map { it.handle }}:${pane.phoneFolders.map { it.path }}:${pane.driveFolders.map { it.id }}:${pane.tree}:${pane.docFolders.map { it.id }}",
-            cursor = pane.cursor, progress = pane.progress
+            progress = pane.progress
         )
     }
 
@@ -546,7 +544,7 @@ class MainActivity : ComponentActivity() {
         if (pane.source != Source.PHONE) return
         // The phone's own level is a fixed list that needs no file access.
         if (pane.phoneFolders.isEmpty()) {
-            update(index) { it.copy(entries = emptyList(), busy = false, cursor = null, revision = it.revision + 1,
+            update(index) { it.copy(entries = emptyList(), busy = false, revision = it.revision + 1,
                 status = completionStatus ?: "Storage and standard folders") }
             return
         }
@@ -558,7 +556,7 @@ class MainActivity : ComponentActivity() {
         val folder = pane.phoneFolders.last()
         val revision = pane.revision + 1
         update(index) { it.copy(revision = revision, busy = true, entries = emptyList(),
-            cursor = null, status = "Reading phone folder…") }
+            status = "Reading phone folder…") }
         worker.execute {
             val result = try {
                 check(phoneAccess()) { "All-files access was revoked" }
@@ -587,7 +585,7 @@ class MainActivity : ComponentActivity() {
         val folder = pane.driveFolders.last()
         val revision = pane.revision + 1
         update(index) { it.copy(revision = revision, busy = true, entries = emptyList(),
-            cursor = null, status = "Reading Google Drive…") }
+            status = "Reading Google Drive…") }
         network.execute {
             val result = runCatching {
                 drive.list(folder.id).onEach { driveFiles[it.id] = it }
@@ -719,7 +717,7 @@ class MainActivity : ComponentActivity() {
         val folder = pane.docFolders.last()
         val revision = pane.revision + 1
         update(index) { it.copy(revision = revision, busy = true, entries = emptyList(),
-            cursor = null, status = "Reading drive…") }
+            status = "Reading drive…") }
         local.execute {
             val result = runCatching {
                 trees.list(tree, folder.id).map { CommanderItem(it.id, it.name, it.folder, it.size, it.modified) }
@@ -871,7 +869,6 @@ class MainActivity : ComponentActivity() {
                     update(index) { it.copy(busy = false,
                         entries = result.getOrNull()?.map { entry -> CommanderItem(entry.handle.toString(), entry.name,
                             entry.directory, entry.size, entry.modified) } ?: it.entries,
-                        cursor = if (result.isSuccess) null else it.cursor,
                         status = result.fold({ entries -> completionStatus ?: if (entries.isEmpty()) "Folder is empty."
                             else "${entries.size} items" }, { "Could not list files: ${it.message}" })) }
                 }
