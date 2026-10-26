@@ -1,0 +1,26 @@
+MTP Commander is a two-pane file manager for moving files between your phone and the devices you plug into it.
+
+Connect a Garmin watch, another MTP device or a USB drive over USB-C or OTG, and copy files in either direction: maps, courses, workouts, music or FIT activity files. You can also copy files to and from your own Google Drive.
+
+TWO PANES, ANY SOURCE
+Open phone storage, a USB device, a USB drive or Google Drive in each pane, and copy from one to the other. Garmin watches show up by their model name.
+
+COPY LISTS, NOT ACCIDENTS
+Tap files to add them to a copy list or a trash list, and see the total size before you start. Nothing is copied or deleted until you press the button. If a file already exists at the destination, the app asks before overwriting it.
+
+FIND FILES FAST
+Search every subfolder by name or pattern, such as *.fit or course?.gpx, and add the results straight to your list. Sort any folder by name, size or date.
+
+BUILT FOR RELIABLE TRANSFERS
+- Progress shown for every copy
+- Drag and drop between panes
+- Opens the device as soon as you grant USB access
+- Closes a pane cleanly when a drive is unplugged
+- Night mode
+
+PRIVATE BY DESIGN
+No accounts, no ads, no analytics. Google Drive access is limited to files MTP Commander created itself, so the app never sees the rest of your Drive.
+
+Requires a phone with USB host (OTG) support.
+
+MTP Commander is an independent app and is not affiliated with or endorsed by Garmin Ltd.
