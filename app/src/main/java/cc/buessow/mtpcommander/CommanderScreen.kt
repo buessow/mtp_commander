@@ -63,6 +63,7 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontFamily
@@ -212,20 +213,21 @@ internal fun CommanderScreen(
             dismissButton = { TextButton(onClick = onDismissPhoneAccess) { Text("Not now") } }
         )
     }
-    Box(Modifier.fillMaxSize().background(paper)) {
-    Column(Modifier.fillMaxSize().safeDrawingPadding()) {
-        Row(Modifier.fillMaxWidth().height(54.dp).padding(start = 16.dp, end = 8.dp),
-            verticalAlignment = Alignment.CenterVertically) {
-            Text("MTP COMMANDER", fontFamily = heading, fontWeight = FontWeight.Black,
-                fontSize = 23.sp, letterSpacing = (-0.7).sp, color = ink, maxLines = 1)
-            Spacer(Modifier.weight(1f))
-            Text(panes[activePane].title, color = accent, fontSize = 10.sp, maxLines = 1,
-                overflow = TextOverflow.Ellipsis, modifier = Modifier.width(106.dp),
-                textAlign = TextAlign.End)
-            Text(" ↻ ", modifier = Modifier.clickable(onClick = onRefresh).padding(5.dp),
-                fontSize = 22.sp, color = accent)
-        }
-        Row(Modifier.fillMaxWidth().border(BorderStroke(0.5.dp, divider))) {
+    // In landscape the panes sit side by side and the title shares a row with the tool buttons.
+    val wide = LocalConfiguration.current.run { screenWidthDp > screenHeightDp }
+    val title = @Composable {
+        Text("MTP COMMANDER", fontFamily = heading, fontWeight = FontWeight.Black,
+            fontSize = 23.sp, letterSpacing = (-0.7).sp, color = ink, maxLines = 1)
+    }
+    val paneTitleAndRefresh = @Composable {
+        Text(panes[activePane].title, color = accent, fontSize = 10.sp, maxLines = 1,
+            overflow = TextOverflow.Ellipsis, modifier = Modifier.width(106.dp),
+            textAlign = TextAlign.End)
+        Text(" ↻ ", modifier = Modifier.clickable(onClick = onRefresh).padding(5.dp),
+            fontSize = 22.sp, color = accent)
+    }
+    val tools: @Composable (Modifier) -> Unit = { modifier ->
+        Row(modifier.border(BorderStroke(0.5.dp, divider))) {
             listOf(
                 ToolButton("Copy", "▣", mode == CommanderMode.COPY) { onMode(CommanderMode.COPY) },
                 ToolButton("Delete", "×", mode == CommanderMode.DELETE) { onMode(CommanderMode.DELETE) },
@@ -245,51 +247,79 @@ internal fun CommanderScreen(
                 }
             }
         }
-        panes.indices.forEach { slot ->
-            if (slot == 1) Spacer(Modifier.fillMaxWidth().height(1.dp).background(divider))
-            val paneModifier = Modifier.weight(1f)
-            // Index of the folder pane shown in this slot; while searching only the copy target is shown.
-            val index = if (newFolder.active) newFolder.target else if (search.active) search.target else slot
-            val pane = panes[index]
-            if (newFolder.active && slot == 0)
-                NewFolderInput(newFolder, onNewFolderName, onCreateFolder, modifier = paneModifier)
-            else if (search.active && slot == 1) SearchResults(search, picked,
-                pickEnabled = mode != CommanderMode.NONE,
-                onPick = { id -> balloonHidden = true; onPickHit(id) }, modifier = paneModifier)
-            else if (search.active && mode == CommanderMode.NONE)
-                SearchInput(search, onSearchQuery, onSearch, modifier = paneModifier)
-            else if (mode != CommanderMode.NONE && slot == basketSlot)
-                Basket(copy = mode == CommanderMode.COPY, basket, onRemove = onUnpick, onExecute = onExecute,
-                    onClear = onClear, executeLabel = executeLabel, busy = basketBusy, modifier = paneModifier)
-            else key(index, pane.navigationKey) {
-                Pane(
-                    listState = listStates.getOrPut(pane.navigationKey) { LazyListState() },
-                    title = pane.title, symbol = if (index == 0) "▯" else "◉", path = pane.path,
-                    entries = remember(pane.entries, sort) { sort.apply(pane.entries) }, sort = sort, onSort = onSort,
-                    isActive = activePane == index, isBusy = pane.busy,
-                    cursor = pane.cursor, onCursor = { onCursor(index, it) }, progress = pane.progress,
-                    emptyMessage = pane.status,
-                    actionLabel = pane.actionLabel, onAction = { onAction(index) },
-                    onNavigate = { depth -> onActivate(index); onNavigate(index, depth) },
-                    onOpen = { item -> if (item.directory) onOpen(index, item) else onActivate(index) },
-                    onActivate = { onActivate(index) },
-                    pickEnabled = !search.active && mode != CommanderMode.NONE && pane.pickable && !pane.busy,
-                    picked = picked,
-                    onPick = { items -> onActivate(index); balloonHidden = true; onPick(index, items) },
-                    modifier = paneModifier
-                )
+    }
+    val paneSlot: @Composable (Int, Modifier) -> Unit = { slot, paneModifier ->
+        // Index of the folder pane shown in this slot; while searching only the copy target is shown.
+        val index = if (newFolder.active) newFolder.target else if (search.active) search.target else slot
+        val pane = panes[index]
+        if (newFolder.active && slot == 0)
+            NewFolderInput(newFolder, onNewFolderName, onCreateFolder, modifier = paneModifier)
+        else if (search.active && slot == 1) SearchResults(search, picked,
+            pickEnabled = mode != CommanderMode.NONE,
+            onPick = { id -> balloonHidden = true; onPickHit(id) }, modifier = paneModifier)
+        else if (search.active && mode == CommanderMode.NONE)
+            SearchInput(search, onSearchQuery, onSearch, modifier = paneModifier)
+        else if (mode != CommanderMode.NONE && slot == basketSlot)
+            Basket(copy = mode == CommanderMode.COPY, basket, onRemove = onUnpick, onExecute = onExecute,
+                onClear = onClear, executeLabel = executeLabel, busy = basketBusy, modifier = paneModifier)
+        else key(index, pane.navigationKey) {
+            Pane(
+                listState = listStates.getOrPut(pane.navigationKey) { LazyListState() },
+                title = pane.title, symbol = if (index == 0) "▯" else "◉", path = pane.path,
+                entries = remember(pane.entries, sort) { sort.apply(pane.entries) }, sort = sort, onSort = onSort,
+                isActive = activePane == index, isBusy = pane.busy,
+                cursor = pane.cursor, onCursor = { onCursor(index, it) }, progress = pane.progress,
+                emptyMessage = pane.status,
+                actionLabel = pane.actionLabel, onAction = { onAction(index) },
+                onNavigate = { depth -> onActivate(index); onNavigate(index, depth) },
+                onOpen = { item -> if (item.directory) onOpen(index, item) else onActivate(index) },
+                onActivate = { onActivate(index) },
+                pickEnabled = !search.active && mode != CommanderMode.NONE && pane.pickable && !pane.busy,
+                picked = picked,
+                onPick = { items -> onActivate(index); balloonHidden = true; onPick(index, items) },
+                modifier = paneModifier
+            )
+        }
+    }
+    Box(Modifier.fillMaxSize().background(paper)) {
+    Column(Modifier.fillMaxSize().safeDrawingPadding()) {
+        if (wide) {
+            Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp),
+                verticalAlignment = Alignment.CenterVertically) {
+                title()
+                tools(Modifier.weight(1f).padding(start = 16.dp))
+                paneTitleAndRefresh()
+            }
+            Row(Modifier.weight(1f).fillMaxWidth()) {
+                panes.indices.forEach { slot ->
+                    if (slot == 1) Spacer(Modifier.fillMaxHeight().width(1.dp).background(divider))
+                    paneSlot(slot, Modifier.weight(1f))
+                }
+            }
+        } else {
+            Row(Modifier.fillMaxWidth().height(54.dp).padding(start = 16.dp, end = 8.dp),
+                verticalAlignment = Alignment.CenterVertically) {
+                title()
+                Spacer(Modifier.weight(1f))
+                paneTitleAndRefresh()
+            }
+            tools(Modifier.fillMaxWidth())
+            panes.indices.forEach { slot ->
+                if (slot == 1) Spacer(Modifier.fillMaxWidth().height(1.dp).background(divider))
+                paneSlot(slot, Modifier.weight(1f))
             }
         }
         Text(panes[activePane].status,
-            Modifier.fillMaxWidth().height(44.dp).padding(horizontal = 12.dp, vertical = 5.dp),
-            color = muted, fontSize = 11.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            Modifier.fillMaxWidth().height(if (wide) 28.dp else 44.dp).padding(horizontal = 12.dp, vertical = 5.dp),
+            color = muted, fontSize = 11.sp, maxLines = if (wide) 1 else 2, overflow = TextOverflow.Ellipsis)
     }
     val button = buttonBounds[if (mode == CommanderMode.DELETE) 1 else 0]
     if (balloon != null && !balloonHidden && button != Rect.Zero) {
+        val above = if (wide) "on the left" else "above"
         val message = when (balloon) {
-            "search-copy-2" -> "Tap search results to add them to the copy list above; tap again to take them " +
+            "search-copy-2" -> "Tap search results to add them to the copy list $above; tap again to take them " +
                 "out. The COPY button copies them into the folder named on it."
-            "search-delete-2" -> "Tap search results to add them to the trash above; tap again to take them out. " +
+            "search-delete-2" -> "Tap search results to add them to the trash $above; tap again to take them out. " +
                 "Nothing is deleted until you press DELETE."
             "copy-4" -> "Tap files to add them to the copy list, tap again to take them out. Hold to add everything " +
                 "in the folder; tap a folder's ▱ to add the folder itself. COPY copies them into the folder that " +
