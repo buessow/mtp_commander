@@ -53,6 +53,8 @@ jobs:
       - name: Create GitHub release
         run: |
           base=$(sed -n 's/.*versionName = "\([^"]*\)".*/\1/p' app/build.gradle.kts)
+          # A re-run of a failed upload keeps its run number, and with it the release made the first time.
+          gh release view "v$base.$GITHUB_RUN_NUMBER" >/dev/null 2>&1 ||
           gh release create "v$base.$GITHUB_RUN_NUMBER" --target "$GITHUB_SHA" --generate-notes \
             app/build/outputs/apk/release/*.apk app/build/outputs/bundle/release/*.aab
         env:
@@ -66,5 +68,5 @@ jobs:
           packageName: cc.buessow.mtpcommander
           releaseFiles: app/build/outputs/bundle/release/app-release.aab
           mappingFile: app/build/outputs/mapping/release/mapping.txt
-          track: internal
+          tracks: internal
           status: completed
