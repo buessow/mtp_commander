@@ -690,7 +690,7 @@ class MainActivity : ComponentActivity() {
             .firstOrNull { it.folder && it.name.equals("GARMIN", ignoreCase = true) } ?: return null
         val fit = trees.list(tree, garmin.id)
             .firstOrNull { !it.folder && it.name.equals("Device.fit", ignoreCase = true) } ?: return null
-        GarminModel.productId(trees.read(tree, fit.id, 64 * 1024))?.let { GarminModel.name(this, it) }
+        GarminModel.productId(trees.read(tree, fit.id, 64 * 1024))?.let { GarminModel.name(it) }
     }.getOrNull()
 
     /**
