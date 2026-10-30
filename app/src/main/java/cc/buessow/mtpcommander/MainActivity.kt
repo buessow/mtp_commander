@@ -160,6 +160,9 @@ class MainActivity : ComponentActivity() {
     private var newFolderPane by mutableStateOf(0)
     private var newFolderName by mutableStateOf("")
     private var searchGeneration = 0
+    // The file shown in the viewer; the generation drops reads of a file the viewer no longer shows.
+    private var viewing by mutableStateOf<FileView?>(null)
+    private var viewGeneration = 0
     private data class SearchResult(val hit: SearchHit, val phoneFolders: List<File>, val folders: List<Folder>,
         val driveFolders: List<DriveFolder> = emptyList(), val docFolders: List<DocFolder> = emptyList())
     /** An item picked for copying or deleting, with the folder it was picked in. */
@@ -238,8 +241,9 @@ class MainActivity : ComponentActivity() {
                     selection = basket.map { it.item },
                     picked = basket.mapTo(mutableSetOf()) { it.item.id },
                     onPick = { index, items -> pick(index, items) },
-                    onOpenFile = { index, item -> openFile(index, item) },
-                    onOpenHit = ::openSearchHit,
+                    onFile = { index, item -> if (mode == CommanderMode.VIEW) viewFile(index, item) else openFile(index, item) },
+                    onFileHit = ::openSearchHit,
+                    viewer = viewing, onCloseViewer = { viewGeneration++; viewing = null },
                     busy = panes.any { it.busy },
                     onExecute = { if (mode == CommanderMode.DELETE) deleteTrash() else copyBasket() },
                     onClear = { basket = emptyList() },
@@ -976,7 +980,59 @@ class MainActivity : ComponentActivity() {
 
     private fun openSearchHit(id: String) {
         val (item, source) = searchHit(id) ?: return
-        openFile(0, item, source)
+        if (mode == CommanderMode.VIEW) viewFile(0, item, source) else openFile(0, item, source)
+    }
+
+    /** On the worker: copies [item] from an MTP device or Google Drive into the cache, reporting the fraction done. */
+    private fun cacheCopy(source: PaneState, item: CommanderItem, epoch: Int?, onProgress: (Float?) -> Unit): File {
+        check(source.deviceName == null || epoch == epochs[source.deviceName]) { "Device disconnected" }
+        check(validName(item.name)) { "Invalid filename" }
+        if (source.source == Source.DRIVE)
+            check(driveFile(item).copyable) { "${item.name} is a Google document without file content" }
+        // Only the file fetched last is kept; the app showing an earlier one has read it by now.
+        val folder = File(cacheDir, "open").apply { deleteRecursively(); mkdirs() }
+        val file = File(folder, item.name)
+        var lastReport = 0L
+        fetch(source, item, file) { copied, total ->
+            val now = System.currentTimeMillis()
+            if (copied == total || now - lastReport >= 200) {
+                lastReport = now
+                onProgress(if (total > 0) copied.toFloat() / total else null)
+            }
+        }
+        return file
+    }
+
+    /** Shows what is in [item], found in [source] and shown in pane [index], in the viewer. */
+    private fun viewFile(index: Int, item: CommanderItem, source: PaneState = panes[index]) {
+        if (item.directory || panes[index].busy || source.source == Source.DEVICES) return
+        if (source.source == Source.PHONE && !phoneAccess()) {
+            update(index) { it.copy(status = "Grant all-files access to view phone files.") }; return
+        }
+        val remote = source.source == Source.MTP || source.source == Source.DRIVE
+        if (remote && item.size > FileContents.FILE_LIMIT) {
+            update(index) { it.copy(status = "${item.name} is too large to view. Use OPEN instead.") }; return
+        }
+        val generation = ++viewGeneration
+        val epoch = source.deviceName?.let { epochs[it] }
+        viewing = FileView(item.name, busy = true)
+        (if (remote) worker else local).execute {
+            val result = runCatching {
+                when (source.source) {
+                    Source.PHONE -> phoneItem(source, item).inputStream()
+                    Source.USB -> contentResolver.openInputStream(
+                        DocumentsContract.buildDocumentUriUsingTree(source.tree!!, item.id)) ?: error("Cannot read")
+                    else -> cacheCopy(source, item, epoch) { fraction ->
+                        runOnUiThread { if (generation == viewGeneration) viewing = viewing?.copy(progress = fraction) }
+                    }.inputStream()
+                }.use { FileContents.view(item.name, it) }
+            }
+            runOnUiThread {
+                if (isDestroyed || generation != viewGeneration) return@runOnUiThread
+                viewing = result.getOrElse { e -> FileView(item.name, message = if (source.source == Source.DRIVE)
+                    driveError(e) else "Could not read ${item.name}: ${e.message}") }
+            }
+        }
     }
 
     /**
@@ -998,25 +1054,11 @@ class MainActivity : ComponentActivity() {
                 update(index) { it.copy(busy = true, status = "Opening ${item.name}…") }
                 worker.execute {
                     val result = runCatching {
-                        check(source.deviceName == null || epoch == epochs[source.deviceName]) { "Device disconnected" }
-                        check(validName(item.name)) { "Invalid filename" }
-                        if (source.source == Source.DRIVE)
-                            check(driveFile(item).copyable) { "${item.name} is a Google document without file content" }
-                        // Only the file opened last is kept; the app showing an earlier one has read it by now.
-                        val folder = File(cacheDir, "open").apply { deleteRecursively(); mkdirs() }
-                        val file = File(folder, item.name)
-                        var lastReport = 0L
-                        fetch(source, item, file) { copied, total ->
-                            val now = System.currentTimeMillis()
-                            if (copied == total || now - lastReport >= 200) {
-                                lastReport = now
-                                val fraction = if (total > 0) copied.toFloat() / total else null
-                                runOnUiThread {
-                                    if (!isDestroyed && panes[index].busy) update(index) { it.copy(progress = fraction) }
-                                }
+                        cacheCopy(source, item, epoch) { fraction ->
+                            runOnUiThread {
+                                if (!isDestroyed && panes[index].busy) update(index) { it.copy(progress = fraction) }
                             }
                         }
-                        file
                     }
                     runOnUiThread {
                         if (isDestroyed) return@runOnUiThread

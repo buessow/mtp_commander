@@ -28,9 +28,12 @@ Website and user guide: https://buessow.github.io/mtp_commander/ ·
    Google Drive files go to Drive's trash.
 5. **SEARCH** finds files in every subfolder of the list's folder. Plain text matches any part of a name; `*` and
    `?` are wildcards, e.g. `*.fit`. With COPY or DELETE on, tick results to add them.
-6. **NEW FOLDER** creates a folder in the list's folder. In COPY, tap the second list's header first to create it
+6. **OPEN** opens a tapped file in another app. Files on a USB device or Google Drive are copied to the phone first.
+7. **VIEW** shows a tapped text file, or a FIT file's header and a table for each kind of message in it (events,
+   records, laps, device info, …).
+8. **NEW FOLDER** creates a folder in the list's folder. In COPY, tap the second list's header first to create it
    there.
-7. Tap a column header (Name, Size, Date) to sort by it.
+9. Tap a column header (Name, Size, Date) to sort by it.
 
 ## Local development
 

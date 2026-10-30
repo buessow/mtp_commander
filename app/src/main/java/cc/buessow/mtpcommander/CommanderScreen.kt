@@ -1,7 +1,9 @@
 package cc.buessow.mtpcommander
 
 import android.text.format.Formatter
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -52,6 +54,7 @@ import androidx.compose.runtime.key
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.toMutableStateList
 import androidx.compose.runtime.remember
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.runtime.setValue
@@ -97,7 +100,7 @@ internal data class CommanderPane(
     val pickable: Boolean = false, val progress: Float? = null
 )
 
-internal enum class CommanderMode { NONE, COPY, DELETE, OPEN }
+internal enum class CommanderMode { NONE, COPY, DELETE, OPEN, VIEW }
 
 /** File list order; folders always come first. */
 private enum class SortKey { NAME, SIZE, DATE }
@@ -170,20 +173,22 @@ internal fun CommanderScreen(
     showPhoneAccessExplanation: Boolean, onConfirmPhoneAccess: () -> Unit,
     onDismissPhoneAccess: () -> Unit, mode: CommanderMode, onMode: (CommanderMode) -> Unit,
     selection: List<CommanderItem>, picked: Set<String>,
-    onPick: (Int, List<CommanderItem>) -> Unit, onOpenFile: (Int, CommanderItem) -> Unit, onOpenHit: (String) -> Unit,
+    onPick: (Int, List<CommanderItem>) -> Unit, onFile: (Int, CommanderItem) -> Unit, onFileHit: (String) -> Unit,
+    viewer: FileView?, onCloseViewer: () -> Unit,
     onExecute: () -> Unit, onClear: () -> Unit, busy: Boolean,
     search: SearchState, onSearchToggle: () -> Unit, onSearchQuery: (String) -> Unit, onSearch: () -> Unit,
     onPickHit: (String) -> Unit, newFolder: NewFolderState, onNewFolderToggle: () -> Unit,
     onNewFolderName: (String) -> Unit, onCreateFolder: () -> Unit
 ) {
     val density = LocalDensity.current
-    val buttonBounds = remember { mutableStateListOf(Rect.Zero, Rect.Zero, Rect.Zero, Rect.Zero, Rect.Zero) }
+    val buttonBounds = remember { mutableStateListOf(Rect.Zero, Rect.Zero, Rect.Zero, Rect.Zero, Rect.Zero, Rect.Zero) }
     val context = LocalContext.current
     // Each instruction balloon is shown once after install; the preference records which ones were seen.
     val hints = remember { context.getSharedPreferences("hints", android.content.Context.MODE_PRIVATE) }
     val balloon = when {
         mode == CommanderMode.NONE -> null
         mode == CommanderMode.OPEN -> "open-1"
+        mode == CommanderMode.VIEW -> "view-1"
         search.active && mode == CommanderMode.COPY -> "search-copy-3"
         search.active -> "search-delete-3"
         mode == CommanderMode.COPY -> "copy-5"
@@ -231,6 +236,7 @@ internal fun CommanderScreen(
                 ToolButton("Copy", "▣", mode == CommanderMode.COPY) { onMode(CommanderMode.COPY) },
                 ToolButton("Delete", "×", mode == CommanderMode.DELETE) { onMode(CommanderMode.DELETE) },
                 ToolButton("Open", "↗", mode == CommanderMode.OPEN) { onMode(CommanderMode.OPEN) },
+                ToolButton("View", "≡", mode == CommanderMode.VIEW) { onMode(CommanderMode.VIEW) },
                 ToolButton("Search", "⌕", search.active, onSearchToggle),
                 ToolButton("New folder", "+", newFolder.active, onNewFolderToggle)
             ).forEachIndexed { index, (label, icon, on, onClick) ->
@@ -242,8 +248,8 @@ internal fun CommanderScreen(
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.Center) {
                     Text(icon, fontSize = 19.sp, color = if (on) onActive else muted)
-                    Text(label.uppercase(), fontSize = 10.sp, fontWeight = FontWeight.Bold,
-                        letterSpacing = 0.5.sp, color = if (on) onActive else muted)
+                    Text(label.uppercase(), fontSize = 10.sp, fontWeight = FontWeight.Bold, lineHeight = 11.sp,
+                        letterSpacing = 0.5.sp, color = if (on) onActive else muted, textAlign = TextAlign.Center)
                 }
             }
         }
@@ -254,7 +260,8 @@ internal fun CommanderScreen(
         if (search.active && index == 0) SearchPanel(search, onSearchQuery, onSearch, picked,
             pickEnabled = mode == CommanderMode.COPY || mode == CommanderMode.DELETE,
             onPick = { id -> balloonHidden = true; onPickHit(id) },
-            onOpen = if (mode == CommanderMode.OPEN) ({ id -> balloonHidden = true; onOpenHit(id) }) else null,
+            onOpen = if (mode == CommanderMode.OPEN || mode == CommanderMode.VIEW)
+                ({ id -> balloonHidden = true; onFileHit(id) }) else null,
             modifier = paneModifier)
         else Column(paneModifier) {
             if (newFolder.active && newFolder.target == index)
@@ -271,7 +278,9 @@ internal fun CommanderScreen(
                     onNavigate = { depth -> onActivate(index); onNavigate(index, depth) },
                     onOpen = { item ->
                         if (item.directory) onOpen(index, item)
-                        else if (mode == CommanderMode.OPEN) { balloonHidden = true; onOpenFile(index, item) }
+                        else if (mode == CommanderMode.OPEN || mode == CommanderMode.VIEW) {
+                            balloonHidden = true; onFile(index, item)
+                        }
                         else onActivate(index)
                     },
                     onActivate = { onActivate(index) },
@@ -286,6 +295,8 @@ internal fun CommanderScreen(
     }
     val slots = if (mode == CommanderMode.COPY) panes.indices else 0..0
     Box(Modifier.fillMaxSize().background(paper)) {
+    // The viewer takes the whole screen; the lists keep their state underneath.
+    if (viewer != null) { Viewer(viewer, onCloseViewer); return@Box }
     Column(Modifier.fillMaxSize().safeDrawingPadding()) {
         if (wide) {
             Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp),
@@ -319,10 +330,14 @@ internal fun CommanderScreen(
             Modifier.fillMaxWidth().height(if (wide) 28.dp else 44.dp).padding(horizontal = 12.dp, vertical = 5.dp),
             color = muted, fontSize = 11.sp, maxLines = if (wide) 1 else 2, overflow = TextOverflow.Ellipsis)
     }
-    val button = buttonBounds[when (mode) { CommanderMode.DELETE -> 1; CommanderMode.OPEN -> 2; else -> 0 }]
+    val button = buttonBounds[when (mode) {
+        CommanderMode.DELETE -> 1; CommanderMode.OPEN -> 2; CommanderMode.VIEW -> 3; else -> 0
+    }]
     if (balloon != null && !balloonHidden && button != Rect.Zero) {
         val target = if (wide) "on the right" else "below"
         val message = when (balloon) {
+            "view-1" -> "Tap a text or FIT file to see what is in it. FIT files show their header and a table " +
+                "for each kind of message."
             "open-1" -> "Tap a file to open it in another app. Files on a watch or in Google Drive are copied to " +
                 "the phone first."
             "search-copy-3" -> "Tick search results to copy them. Open the folder to copy into in the list $target, " +
@@ -425,6 +440,83 @@ private fun NewFolderInput(state: NewFolderState, onName: (String) -> Unit, onCr
         keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done, autoCorrectEnabled = false,
             capitalization = KeyboardCapitalization.None),
         keyboardActions = KeyboardActions(onDone = { onCreate() }), colors = inputColors)
+}
+
+/** A text file's lines, or a FIT file's header and message tables, over the whole screen. */
+@Composable
+private fun Viewer(view: FileView, onClose: () -> Unit) {
+    BackHandler(onBack = onClose)
+    Column(Modifier.fillMaxSize().safeDrawingPadding()) {
+        Row(Modifier.fillMaxWidth().height(48.dp).background(active), verticalAlignment = Alignment.CenterVertically) {
+            Text("‹", Modifier.clickable(onClick = onClose).padding(horizontal = 16.dp, vertical = 4.dp),
+                color = onActive, fontSize = 26.sp)
+            Text(view.name, Modifier.weight(1f).padding(end = 12.dp), color = onActive, fontSize = 15.sp,
+                fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+        if (view.busy) {
+            if (view.progress != null) LinearProgressIndicator(progress = { view.progress },
+                Modifier.fillMaxWidth().height(4.dp), color = accent, trackColor = divider)
+            Row(Modifier.padding(18.dp), verticalAlignment = Alignment.CenterVertically) {
+                CircularProgressIndicator(Modifier.size(16.dp), color = accent, strokeWidth = 2.dp)
+                Text("Reading…", Modifier.padding(start = 10.dp), color = muted, fontSize = 12.sp)
+            }
+        }
+        view.message?.let { Text(it, Modifier.padding(horizontal = 12.dp, vertical = 8.dp), color = muted, fontSize = 12.sp) }
+        val lines = view.lines
+        if (lines != null) LazyColumn(Modifier.weight(1f).padding(horizontal = 12.dp)) {
+            items(lines.size) { i ->
+                Text(lines[i], fontFamily = FontFamily.Monospace, fontSize = 12.sp, color = ink)
+            }
+        }
+        else if (view.sections.isNotEmpty()) {
+            // Sections start collapsed when long, so all of them fit on the first screen.
+            val collapsed = remember(view) { view.sections.filter { it.rows.size > 20 }.map { it.title }.toMutableStateList() }
+            val scrolls = remember(view) { view.sections.map { ScrollState(0) } }
+            val charWidth = with(LocalDensity.current) { 11.sp.toDp() } * 0.62f
+            LazyColumn(Modifier.weight(1f)) {
+                view.sections.forEachIndexed { index, section ->
+                    val open = section.title !in collapsed
+                    val widths = section.columns.indices.map { c ->
+                        charWidth * (sequenceOf(section.columns[c]) + section.rows.asSequence().take(200).map { it[c] })
+                            .maxOf { it.length }.coerceIn(3, 30) + 12.dp
+                    }
+                    item(key = "s$index") {
+                        Row(Modifier.fillMaxWidth().height(37.dp).background(if (open) active else paper)
+                            .border(BorderStroke(0.5.dp, divider))
+                            .clickable { if (open) collapsed += section.title else collapsed -= section.title }
+                            .padding(horizontal = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Text(if (open) "▾" else "▸", color = if (open) onActive else accent, fontSize = 15.sp)
+                            Spacer(Modifier.width(8.dp))
+                            Text(section.title, color = if (open) onActive else ink, fontSize = 14.sp,
+                                fontWeight = FontWeight.Bold, letterSpacing = 0.5.sp)
+                        }
+                    }
+                    if (open) {
+                        item(key = "h$index") {
+                            TableRow(section.columns, widths, scrolls[index], header = true)
+                        }
+                        items(section.rows.size, key = { "r$index:$it" }) { row ->
+                            TableRow(section.rows[row], widths, scrolls[index], header = false)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** One row of a viewer table; the rows of a section scroll sideways together. */
+@Composable
+private fun TableRow(cells: List<String>, widths: List<androidx.compose.ui.unit.Dp>, scroll: ScrollState,
+    header: Boolean) {
+    Row(Modifier.fillMaxWidth().horizontalScroll(scroll).padding(start = 10.dp, top = 3.dp, bottom = 3.dp)) {
+        cells.forEachIndexed { i, cell ->
+            Text(cell, Modifier.width(widths[i]).padding(end = 12.dp), fontFamily = FontFamily.Monospace,
+                fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                color = if (header) accent else ink, fontWeight = if (header) FontWeight.Bold else FontWeight.Normal)
+        }
+    }
+    Spacer(Modifier.fillMaxWidth().height(0.5.dp).background(divider.copy(alpha = 0.5f)))
 }
 
 private data class ToolButton(val label: String, val icon: String, val on: Boolean, val onClick: () -> Unit)
