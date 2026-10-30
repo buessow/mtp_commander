@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Files handed to other apps to open: phone storage in place, other sources from a copy in the cache. -->
+<paths>
+    <external-path name="storage" path="." />
+    <cache-path name="open" path="open/" />
+</paths>

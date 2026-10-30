@@ -1,6 +1,7 @@
 package cc.buessow.mtpcommander
 
 import android.app.PendingIntent
+import android.content.ActivityNotFoundException
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -21,6 +22,7 @@ import android.os.Environment
 import android.provider.DocumentsContract
 import android.provider.Settings
 import android.text.format.Formatter
+import android.webkit.MimeTypeMap
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
@@ -38,6 +40,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.core.content.FileProvider
 import cc.buessow.mtpcommander.ui.theme.AndroidMTPTheme
 import com.google.android.gms.common.api.ApiException
 import com.google.android.gms.common.api.CommonStatusCodes
@@ -235,6 +238,8 @@ class MainActivity : ComponentActivity() {
                     selection = basket.map { it.item },
                     picked = basket.mapTo(mutableSetOf()) { it.item.id },
                     onPick = { index, items -> pick(index, items) },
+                    onOpenFile = { index, item -> openFile(index, item) },
+                    onOpenHit = ::openSearchHit,
                     busy = panes.any { it.busy },
                     onExecute = { if (mode == CommanderMode.DELETE) deleteTrash() else copyBasket() },
                     onClear = { basket = emptyList() },
@@ -952,16 +957,91 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun pickSearchHit(id: String) {
-        val result = searchHits.firstOrNull { it.hit.item.id == id } ?: return
-        val root = searchRoot ?: return
-        val source = when (root.source) {
+    /** A search hit and the folder it was found in, as the pane state of that folder. */
+    private fun searchHit(id: String): Pair<CommanderItem, PaneState>? {
+        val result = searchHits.firstOrNull { it.hit.item.id == id } ?: return null
+        val root = searchRoot ?: return null
+        return result.hit.item to when (root.source) {
             Source.PHONE -> root.copy(phoneFolders = result.phoneFolders)
             Source.DRIVE -> root.copy(driveFolders = result.driveFolders)
             Source.USB -> root.copy(docFolders = result.docFolders)
             else -> root.copy(folders = result.folders)
         }
-        if (mode != CommanderMode.NONE) pick(0, listOf(result.hit.item), source)
+    }
+
+    private fun pickSearchHit(id: String) {
+        val (item, source) = searchHit(id) ?: return
+        if (mode == CommanderMode.COPY || mode == CommanderMode.DELETE) pick(0, listOf(item), source)
+    }
+
+    private fun openSearchHit(id: String) {
+        val (item, source) = searchHit(id) ?: return
+        openFile(0, item, source)
+    }
+
+    /**
+     * Opens [item], found in [source] and shown in pane [index], in another app. Phone and USB drive files are
+     * handed over in place; files on an MTP device or Google Drive are copied into the cache first.
+     */
+    private fun openFile(index: Int, item: CommanderItem, source: PaneState = panes[index]) {
+        if (item.directory || panes[index].busy) return
+        if (source.source == Source.PHONE && !phoneAccess()) {
+            update(index) { it.copy(status = "Grant all-files access to open phone files.") }; return
+        }
+        when (source.source) {
+            Source.PHONE -> runCatching { phoneItem(source, item) }.fold(
+                { view(index, FileProvider.getUriForFile(this, "$packageName.files", it), item.name) },
+                { e -> update(index) { it.copy(status = "Could not open ${item.name}: ${e.message}") } })
+            Source.USB -> view(index, DocumentsContract.buildDocumentUriUsingTree(source.tree!!, item.id), item.name)
+            Source.MTP, Source.DRIVE -> {
+                val epoch = source.deviceName?.let { epochs[it] }
+                update(index) { it.copy(busy = true, status = "Opening ${item.name}…") }
+                worker.execute {
+                    val result = runCatching {
+                        check(source.deviceName == null || epoch == epochs[source.deviceName]) { "Device disconnected" }
+                        check(validName(item.name)) { "Invalid filename" }
+                        if (source.source == Source.DRIVE)
+                            check(driveFile(item).copyable) { "${item.name} is a Google document without file content" }
+                        // Only the file opened last is kept; the app showing an earlier one has read it by now.
+                        val folder = File(cacheDir, "open").apply { deleteRecursively(); mkdirs() }
+                        val file = File(folder, item.name)
+                        var lastReport = 0L
+                        fetch(source, item, file) { copied, total ->
+                            val now = System.currentTimeMillis()
+                            if (copied == total || now - lastReport >= 200) {
+                                lastReport = now
+                                val fraction = if (total > 0) copied.toFloat() / total else null
+                                runOnUiThread {
+                                    if (!isDestroyed && panes[index].busy) update(index) { it.copy(progress = fraction) }
+                                }
+                            }
+                        }
+                        file
+                    }
+                    runOnUiThread {
+                        if (isDestroyed) return@runOnUiThread
+                        update(index) { it.copy(busy = false, progress = null) }
+                        result.fold({ view(index, FileProvider.getUriForFile(this, "$packageName.files", it), item.name) },
+                            { e -> update(index) { it.copy(status = if (source.source == Source.DRIVE) driveError(e)
+                                else "Could not open ${item.name}: ${e.message}") } })
+                    }
+                }
+            }
+            Source.DEVICES -> Unit
+        }
+    }
+
+    /** Asks Android for the app that opens [name]'s file type, and hands it [uri] to read. */
+    private fun view(index: Int, uri: Uri, name: String) {
+        val type = MimeTypeMap.getSingleton().getMimeTypeFromExtension(name.substringAfterLast('.', "").lowercase())
+            ?: "application/octet-stream"
+        try {
+            startActivity(Intent(Intent.ACTION_VIEW).setDataAndType(uri, type)
+                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION))
+            update(index) { it.copy(status = "Opened $name") }
+        } catch (_: ActivityNotFoundException) {
+            update(index) { it.copy(status = "No app on this phone opens $name.") }
+        }
     }
 
     private fun startSearch() {

@@ -97,7 +97,7 @@ internal data class CommanderPane(
     val pickable: Boolean = false, val progress: Float? = null
 )
 
-internal enum class CommanderMode { NONE, COPY, DELETE }
+internal enum class CommanderMode { NONE, COPY, DELETE, OPEN }
 
 /** File list order; folders always come first. */
 private enum class SortKey { NAME, SIZE, DATE }
@@ -170,19 +170,20 @@ internal fun CommanderScreen(
     showPhoneAccessExplanation: Boolean, onConfirmPhoneAccess: () -> Unit,
     onDismissPhoneAccess: () -> Unit, mode: CommanderMode, onMode: (CommanderMode) -> Unit,
     selection: List<CommanderItem>, picked: Set<String>,
-    onPick: (Int, List<CommanderItem>) -> Unit,
+    onPick: (Int, List<CommanderItem>) -> Unit, onOpenFile: (Int, CommanderItem) -> Unit, onOpenHit: (String) -> Unit,
     onExecute: () -> Unit, onClear: () -> Unit, busy: Boolean,
     search: SearchState, onSearchToggle: () -> Unit, onSearchQuery: (String) -> Unit, onSearch: () -> Unit,
     onPickHit: (String) -> Unit, newFolder: NewFolderState, onNewFolderToggle: () -> Unit,
     onNewFolderName: (String) -> Unit, onCreateFolder: () -> Unit
 ) {
     val density = LocalDensity.current
-    val buttonBounds = remember { mutableStateListOf(Rect.Zero, Rect.Zero, Rect.Zero, Rect.Zero) }
+    val buttonBounds = remember { mutableStateListOf(Rect.Zero, Rect.Zero, Rect.Zero, Rect.Zero, Rect.Zero) }
     val context = LocalContext.current
     // Each instruction balloon is shown once after install; the preference records which ones were seen.
     val hints = remember { context.getSharedPreferences("hints", android.content.Context.MODE_PRIVATE) }
     val balloon = when {
         mode == CommanderMode.NONE -> null
+        mode == CommanderMode.OPEN -> "open-1"
         search.active && mode == CommanderMode.COPY -> "search-copy-3"
         search.active -> "search-delete-3"
         mode == CommanderMode.COPY -> "copy-5"
@@ -229,6 +230,7 @@ internal fun CommanderScreen(
             listOf(
                 ToolButton("Copy", "▣", mode == CommanderMode.COPY) { onMode(CommanderMode.COPY) },
                 ToolButton("Delete", "×", mode == CommanderMode.DELETE) { onMode(CommanderMode.DELETE) },
+                ToolButton("Open", "↗", mode == CommanderMode.OPEN) { onMode(CommanderMode.OPEN) },
                 ToolButton("Search", "⌕", search.active, onSearchToggle),
                 ToolButton("New folder", "+", newFolder.active, onNewFolderToggle)
             ).forEachIndexed { index, (label, icon, on, onClick) ->
@@ -250,8 +252,10 @@ internal fun CommanderScreen(
     val paneSlot: @Composable (Int, Modifier) -> Unit = { index, paneModifier ->
         val pane = panes[index]
         if (search.active && index == 0) SearchPanel(search, onSearchQuery, onSearch, picked,
-            pickEnabled = mode != CommanderMode.NONE,
-            onPick = { id -> balloonHidden = true; onPickHit(id) }, modifier = paneModifier)
+            pickEnabled = mode == CommanderMode.COPY || mode == CommanderMode.DELETE,
+            onPick = { id -> balloonHidden = true; onPickHit(id) },
+            onOpen = if (mode == CommanderMode.OPEN) ({ id -> balloonHidden = true; onOpenHit(id) }) else null,
+            modifier = paneModifier)
         else Column(paneModifier) {
             if (newFolder.active && newFolder.target == index)
                 NewFolderInput(newFolder, onNewFolderName, onCreateFolder)
@@ -265,9 +269,14 @@ internal fun CommanderScreen(
                     emptyMessage = pane.status,
                     actionLabel = pane.actionLabel, onAction = { onAction(index) },
                     onNavigate = { depth -> onActivate(index); onNavigate(index, depth) },
-                    onOpen = { item -> if (item.directory) onOpen(index, item) else onActivate(index) },
+                    onOpen = { item ->
+                        if (item.directory) onOpen(index, item)
+                        else if (mode == CommanderMode.OPEN) { balloonHidden = true; onOpenFile(index, item) }
+                        else onActivate(index)
+                    },
                     onActivate = { onActivate(index) },
-                    pickEnabled = index == 0 && mode != CommanderMode.NONE && pane.pickable && !pane.busy,
+                    pickEnabled = index == 0 && (mode == CommanderMode.COPY || mode == CommanderMode.DELETE) &&
+                        pane.pickable && !pane.busy,
                     picked = picked,
                     onPick = { items -> onActivate(index); balloonHidden = true; onPick(index, items) },
                     modifier = Modifier.weight(1f)
@@ -304,16 +313,18 @@ internal fun CommanderScreen(
                 paneSlot(slot, Modifier.weight(1f))
             }
         }
-        if (mode != CommanderMode.NONE)
+        if (mode == CommanderMode.COPY || mode == CommanderMode.DELETE)
             ExecuteBar(copy = mode == CommanderMode.COPY, selection, onExecute = onExecute, onClear = onClear, busy = busy)
         Text(panes[activePane].status,
             Modifier.fillMaxWidth().height(if (wide) 28.dp else 44.dp).padding(horizontal = 12.dp, vertical = 5.dp),
             color = muted, fontSize = 11.sp, maxLines = if (wide) 1 else 2, overflow = TextOverflow.Ellipsis)
     }
-    val button = buttonBounds[if (mode == CommanderMode.DELETE) 1 else 0]
+    val button = buttonBounds[when (mode) { CommanderMode.DELETE -> 1; CommanderMode.OPEN -> 2; else -> 0 }]
     if (balloon != null && !balloonHidden && button != Rect.Zero) {
         val target = if (wide) "on the right" else "below"
         val message = when (balloon) {
+            "open-1" -> "Tap a file to open it in another app. Files on a watch or in Google Drive are copied to " +
+                "the phone first."
             "search-copy-3" -> "Tick search results to copy them. Open the folder to copy into in the list $target, " +
                 "then press COPY."
             "search-delete-3" -> "Tick search results to delete them. Nothing is deleted until you press DELETE."
@@ -354,7 +365,7 @@ private val inputColors @Composable get() = OutlinedTextFieldDefaults.colors(foc
 /** The search box over its results; the search runs below the folder that was open in the list. */
 @Composable
 private fun SearchPanel(search: SearchState, onQuery: (String) -> Unit, onSearch: () -> Unit, picked: Set<String>,
-    pickEnabled: Boolean, onPick: (String) -> Unit, modifier: Modifier) {
+    pickEnabled: Boolean, onPick: (String) -> Unit, onOpen: ((String) -> Unit)?, modifier: Modifier) {
     val focus = remember { FocusRequester() }
     LaunchedEffect(Unit) { focus.requestFocus() }
     Column(modifier.background(paper)) {
@@ -371,8 +382,9 @@ private fun SearchPanel(search: SearchState, onQuery: (String) -> Unit, onSearch
             items(search.hits, key = { it.item.id }) { hit ->
                 val isPicked = pickEnabled && hit.item.id in picked
                 Row(Modifier.fillMaxWidth().height(48.dp).background(if (isPicked) selected else paper)
-                    .combinedClickable(enabled = pickEnabled, onLongClick = { onPick(hit.item.id) }) {
-                        onPick(hit.item.id)
+                    .combinedClickable(enabled = pickEnabled || onOpen != null && !hit.item.directory,
+                        onLongClick = if (pickEnabled) ({ onPick(hit.item.id) }) else null) {
+                        if (pickEnabled) onPick(hit.item.id) else onOpen?.invoke(hit.item.id)
                     }.padding(end = 10.dp), verticalAlignment = Alignment.CenterVertically) {
                     if (pickEnabled) PickBox(isPicked) { onPick(hit.item.id) }
                     ItemIcon(hit.item, Modifier.width(34.dp))
