@@ -1,8 +1,9 @@
 name: Release
 
 # Builds a signed release APK and AAB on every push to the production branch and
-# attaches them to a GitHub release tagged v<versionName>.<run number>. The signing secrets live
-# in the "production" environment, which only the production branch may use.
+# attaches them to a GitHub release tagged v<versionName>.<run number>, then uploads the AAB to
+# Google Play's internal testing track. The signing and Play secrets live in the "production"
+# environment, which only the production branch may use.
 on:
   push:
     branches: [production]
@@ -56,3 +57,14 @@ jobs:
             app/build/outputs/apk/release/*.apk app/build/outputs/bundle/release/*.aab
         env:
           GH_TOKEN: ${{ github.token }}
+
+      # The service account may only release to testing tracks; promote to production in the Play Console.
+      - name: Upload to Google Play internal testing
+        uses: r0adkll/upload-google-play@v1.1.5
+        with:
+          serviceAccountJsonPlainText: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
+          packageName: cc.buessow.mtpcommander
+          releaseFiles: app/build/outputs/bundle/release/app-release.aab
+          mappingFile: app/build/outputs/mapping/release/mapping.txt
+          track: internal
+          status: completed
