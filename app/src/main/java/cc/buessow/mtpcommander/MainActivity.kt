@@ -59,6 +59,8 @@ private val DRIVE_ROOT = DriveFolder(DriveClient.ROOT, "My Drive")
 // The app only reaches Drive files it created itself.
 private const val DRIVE_LABEL = "Google Drive (restricted)"
 private enum class Overwrite { REPLACE, SKIP, STOP }
+/** The pane shown next to the folder list in copy mode, whose folder copies go into. */
+private const val COPY_TARGET = 1
 /** A copy waiting on the worker until the user decides about an item that already exists; the flag means "for all". */
 private class OverwritePrompt(val name: String, val folder: Boolean, val destination: String, val drive: Boolean,
     val more: Boolean, val answer: CompletableFuture<Pair<Overwrite, Boolean>>)
@@ -139,19 +141,18 @@ class MainActivity : ComponentActivity() {
     private var showPhoneAccessExplanation by mutableStateOf(false)
     private var overwritePrompt by mutableStateOf<OverwritePrompt?>(null)
     private var mode by mutableStateOf(CommanderMode.NONE)
-    // In copy and delete mode this pane shows the basket: the copy list or the trash, filled from the other pane.
-    private var basketPane by mutableStateOf(1)
+    // Pane 0 is the folder list on screen; pane 1, the copy target, is only shown in copy mode.
+    // The basket holds what is ticked in pane 0 or the search results, in any folder.
     private var basket by mutableStateOf<List<BasketEntry>>(emptyList())
-    // Search runs recursively below the folder that was open in searchPane when search mode started.
+    // Search runs recursively below the folder that was open in pane 0 when search mode started.
     private var searchOn by mutableStateOf(false)
-    private var searchPane = 0
     private var searchRoot: PaneState? = null
     private var searchRootLabel by mutableStateOf("")
     private var searchQuery by mutableStateOf("")
     private var searchHits by mutableStateOf<List<SearchResult>>(emptyList())
     private var searchBusy by mutableStateOf(false)
     private var searchStatus by mutableStateOf("")
-    // While creating a folder, the upper half takes the name and the lower one shows newFolderPane's folder.
+    // While creating a folder, newFolderPane shows a field for its name above its list.
     private var newFolderOn by mutableStateOf(false)
     private var newFolderPane by mutableStateOf(0)
     private var newFolderName by mutableStateOf("")
@@ -219,7 +220,7 @@ class MainActivity : ComponentActivity() {
                 CommanderScreen(
                     panes = panes.mapIndexed { index, pane -> paneData(index, pane) },
                     activePane = activePane,
-                    onActivate = { if (mode == CommanderMode.NONE || it != basketPane) activePane = it },
+                    onActivate = { activePane = it },
                     onOpen = { index, item -> activePane = index; openItem(index, item) },
                     onNavigate = ::navigateTo, onAction = { index ->
                         if (panes[index].source == Source.PHONE && !phoneAccess())
@@ -230,16 +231,14 @@ class MainActivity : ComponentActivity() {
                     showPhoneAccessExplanation = showPhoneAccessExplanation,
                     onConfirmPhoneAccess = ::requestPhoneAccess,
                     onDismissPhoneAccess = { showPhoneAccessExplanation = false },
-                    mode = mode, onMode = ::toggleMode, basketPane = basketPane,
-                    basket = basket.map { it.item.copy(id = it.key) },
+                    mode = mode, onMode = ::toggleMode,
+                    selection = basket.map { it.item },
                     picked = basket.mapTo(mutableSetOf()) { it.item.id },
                     onPick = { index, items -> pick(index, items) },
-                    onUnpick = ::unpick,
-                    basketBusy = panes.any { it.busy },
+                    busy = panes.any { it.busy },
                     onExecute = { if (mode == CommanderMode.DELETE) deleteTrash() else copyBasket() },
                     onClear = { basket = emptyList() },
-                    executeLabel = executeLabel(),
-                    search = SearchState(searchOn, 1 - searchPane, searchRootLabel, searchQuery,
+                    search = SearchState(searchOn, searchRootLabel, searchQuery,
                         searchHits.map { it.hit }, searchBusy, searchStatus),
                     onSearchToggle = ::toggleSearch, onSearchQuery = { searchQuery = it }, onSearch = ::startSearch,
                     onPickHit = ::pickSearchHit,
@@ -877,21 +876,14 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun toggleMode(toggled: CommanderMode) {
-        newFolderOn = false
         val next = if (mode == toggled) CommanderMode.NONE else toggled
         basket = emptyList()
-        // While searching, the results come from searchPane and the basket takes the search box's place.
-        if (next != CommanderMode.NONE) basketPane = if (searchOn) 1 - searchPane else 1 - activePane
+        // The copy target is only on screen in copy mode.
+        if (next != CommanderMode.COPY) {
+            activePane = 0
+            if (newFolderPane == COPY_TARGET) newFolderOn = false
+        }
         mode = next
-    }
-
-    /** The copy destination: the folder that was open in the pane the copy list now covers. */
-    private fun copyTarget() = basketPane
-
-    private fun executeLabel(): String {
-        val count = "${basket.size} ITEM${if (basket.size == 1) "" else "S"}"
-        return if (mode == CommanderMode.DELETE) "DELETE $count"
-        else "COPY $count TO ${paneData(copyTarget(), panes[copyTarget()]).path.last().label}"
     }
 
     private fun toggleSearch() {
@@ -904,14 +896,13 @@ class MainActivity : ComponentActivity() {
             searchRoot = null
             return
         }
-        val root = panes[activePane]
+        val root = panes[0]
         if (!writablePane(root) || root.source == Source.PHONE && !phoneAccess()) {
-            update(activePane) { it.copy(status = "Open a folder to search in first.") }; return
+            update(0) { it.copy(status = "Open a folder to search in first.") }; return
         }
-        searchPane = activePane
-        basketPane = 1 - searchPane
+        activePane = 0
         searchRoot = root
-        searchRootLabel = paneData(activePane, root).path.joinToString(" / ") { it.label }
+        searchRootLabel = paneData(0, root).path.joinToString(" / ") { it.label }
         searchHits = emptyList()
         searchStatus = "Enter a name or a pattern like *.fit"
         searchOn = true
@@ -919,8 +910,8 @@ class MainActivity : ComponentActivity() {
 
     private fun toggleNewFolder() {
         if (newFolderOn) { newFolderOn = false; return }
-        if (searchOn) toggleSearch()
-        if (mode != CommanderMode.NONE) toggleMode(mode)
+        // The search panel covers pane 0's list.
+        if (searchOn && activePane == 0) toggleSearch()
         newFolderPane = activePane
         newFolderName = ""
         newFolderOn = true
@@ -970,7 +961,7 @@ class MainActivity : ComponentActivity() {
             Source.USB -> root.copy(docFolders = result.docFolders)
             else -> root.copy(folders = result.folders)
         }
-        if (mode != CommanderMode.NONE) pick(searchPane, listOf(result.hit.item), source)
+        if (mode != CommanderMode.NONE) pick(0, listOf(result.hit.item), source)
     }
 
     private fun startSearch() {
@@ -1104,7 +1095,7 @@ class MainActivity : ComponentActivity() {
 
     private fun deleteTrash() {
         val entries = basket
-        val sourceIndex = 1 - basketPane
+        val sourceIndex = 0
         if (entries.isEmpty() || panes[sourceIndex].busy) return
         basket = emptyList()
         update(sourceIndex) { it.copy(busy = true, status = "Deleting ${entries.size} item(s)…") }
@@ -1148,14 +1139,12 @@ class MainActivity : ComponentActivity() {
     /** Copies everything in the basket into the folder open in the copy target pane. */
     private fun copyBasket() {
         val entries = basket
-        val targetIndex = copyTarget()
-        // The destination is hidden behind the copy list, so progress shows in the pane on screen.
-        val shownIndex = 1 - targetIndex
+        val targetIndex = COPY_TARGET
+        val shownIndex = 0
         val destination = panes[targetIndex]
         if (entries.isEmpty()) return
         if (!writablePane(destination)) {
-            update(shownIndex) { it.copy(status = "Leave COPY, open the folder to copy into in the other pane, " +
-                "then pick the files again.") }; return
+            update(shownIndex) { it.copy(status = "Open the folder to copy into in the target list first.") }; return
         }
         if ((destination.source == Source.PHONE || entries.any { it.pane.source == Source.PHONE }) && !phoneAccess()) {
             update(shownIndex) { it.copy(status = "Grant all-files access to copy to or from the phone.") }; return

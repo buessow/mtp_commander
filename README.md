@@ -15,21 +15,22 @@ Website and user guide: https://buessow.github.io/mtp_commander/ ·
 ## Using it
 
 1. Plug a device into the phone's USB port (USB-C or an OTG adapter) and open MTP Commander.
-2. Each pane starts on **Devices**. Tap the phone, a USB device, a USB drive or Google Drive to open it.
+2. The list starts on **Devices**. Tap the phone, a USB device, a USB drive or Google Drive to open it.
    - A USB device asks for USB access the first time.
    - A USB drive, or a camera in mass storage mode, appears as **USB drive · tap to allow access**. Tap it and press
      **Use this folder** in Android's folder picker; the grant is remembered.
    - Google Drive asks you to pick an account. The app only sees files and folders it created itself.
-3. Tap a pane's header to select it. The selected pane has the dark header.
-4. **COPY** turns the other pane into a copy list. Tap files in the selected pane to add them (hold to add the whole
-   folder), then press **COPY n ITEMS** to copy them into the folder the other pane was showing. The app asks before
+3. **COPY** puts a checkbox on every file and opens a second list, below (on the right in landscape), to pick the
+   folder to copy into. Tick files, or hold a file or folder to tick it; ticks are kept while you move between
+   folders. **COPY n FILES · size** copies them into the folder open in the second list. The app asks before
    overwriting.
-5. **DELETE** works the same way with a trash list. Nothing is deleted until you press **DELETE n ITEMS**; Google
-   Drive files go to Drive's trash.
-6. **SEARCH** finds files in every subfolder of the selected pane's folder. Plain text matches any part of a name;
-   `*` and `?` are wildcards, e.g. `*.fit`.
-7. **NEW FOLDER** creates a folder in the selected pane's folder.
-8. Tap a column header (Name, Size, Date) to sort by it.
+4. **DELETE** works the same way, without the second list. Nothing is deleted until you press **DELETE n FILES**;
+   Google Drive files go to Drive's trash.
+5. **SEARCH** finds files in every subfolder of the list's folder. Plain text matches any part of a name; `*` and
+   `?` are wildcards, e.g. `*.fit`. With COPY or DELETE on, tick results to add them.
+6. **NEW FOLDER** creates a folder in the list's folder. In COPY, tap the second list's header first to create it
+   there.
+7. Tap a column header (Name, Size, Date) to sort by it.
 
 ## Local development
 
