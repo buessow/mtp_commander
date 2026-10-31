@@ -281,6 +281,8 @@ internal fun CommanderScreen(
                         else if (mode == CommanderMode.OPEN || mode == CommanderMode.VIEW) {
                             balloonHidden = true; onFile(index, item)
                         }
+                        // Zip files open like folders; OPEN and VIEW above still hand them to another app or the viewer.
+                        else if (ZipArchive.isZip(item.name)) onOpen(index, item)
                         else onActivate(index)
                     },
                     onActivate = { onActivate(index) },
@@ -576,8 +578,9 @@ private fun PickBox(checked: Boolean, onToggle: () -> Unit) {
 
 @Composable
 private fun ItemIcon(item: CommanderItem, modifier: Modifier = Modifier) {
-    Text(if (item.directory) "▱" else "▤", modifier,
-        color = if (item.directory) accent else ink, fontSize = 17.sp, fontWeight = FontWeight.Bold,
+    val zip = !item.directory && ZipArchive.isZip(item.name)
+    Text(if (item.directory) "▱" else if (zip) "▦" else "▤", modifier,
+        color = if (item.directory || zip) accent else ink, fontSize = 17.sp, fontWeight = FontWeight.Bold,
         textAlign = TextAlign.Center)
 }
 

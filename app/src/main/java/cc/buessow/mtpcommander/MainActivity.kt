@@ -58,6 +58,10 @@ private data class StorageEntry(val id: Int, val name: String)
 private data class DeviceIdentity(val isGarmin: Boolean, val model: String?)
 private data class FileEntry(val handle: Int, val name: String, val directory: Boolean, val size: Long, val modified: Long)
 private data class Folder(val handle: Int, val name: String)
+/** A zip file open in a pane: a local copy of it, its name, and the folders open inside it. */
+private data class ZipFolder(val file: File, val name: String, val path: List<String> = emptyList())
+// Path crumbs inside a zip have depths from here on; lower depths belong to the folders around it.
+private const val ZIP_DEPTH = 10_000
 private enum class Source { DEVICES, PHONE, MTP, DRIVE, USB }
 private enum class Overwrite { REPLACE, SKIP, STOP }
 /** The pane shown next to the folder list in copy mode, whose folder copies go into. */
@@ -76,6 +80,8 @@ private data class PaneState(
     // A USB drive, or another folder granted through Android's folder picker, and the folders open in it.
     val tree: Uri? = null,
     val docFolders: List<DocFolder> = emptyList(),
+    // A zip file opened in the folder above, shown instead of that folder until it is left.
+    val zip: ZipFolder? = null,
     val entries: List<CommanderItem> = emptyList(),
     // Empty shows the hint for the current place, such as "Select a device to browse." in the Devices list.
     val status: String = "",
@@ -167,7 +173,7 @@ class MainActivity : ComponentActivity() {
         val driveFolders: List<DriveFolder> = emptyList(), val docFolders: List<DocFolder> = emptyList())
     /** An item picked for copying or deleting, with the folder it was picked in. */
     private data class BasketEntry(val pane: PaneState, val item: CommanderItem, val epoch: Int?) {
-        val key = "${pane.deviceName ?: pane.source.name}:${item.id}"
+        val key = "${pane.deviceName ?: pane.source.name}:${pane.zip?.file?.path.orEmpty()}:${item.id}"
     }
     private val phoneRoot by lazy { Environment.getExternalStorageDirectory() }
     // The phone's standard folders, listed next to Storage when the phone is opened.
@@ -321,7 +327,7 @@ class MainActivity : ComponentActivity() {
         val name = pane.deviceName?.let { identities[it]?.let { identity -> deviceModelLabel(identity) }
             ?: devices.firstOrNull { device -> device.deviceName == it }?.productName ?: getString(R.string.mtp_device) }
         val deviceStorages = storages[pane.deviceName].orEmpty()
-        val entries = when (pane.source) {
+        val entries = if (pane.zip != null) pane.entries else when (pane.source) {
             Source.DEVICES -> listOf(CommanderItem("local:phone", phoneLabel, true, -1, 0),
                 CommanderItem("local:drive", driveLabel, true, -1, 0)) +
                 // Drives and MTP devices are plugged in, unlike the phone and Drive; "(USB)" tells them apart.
@@ -342,7 +348,7 @@ class MainActivity : ComponentActivity() {
                 CommanderItem(it.id.toString(), it.name, true, -1, 0)
             } else pane.entries
         }
-        val path = when (pane.source) {
+        val folderPath = when (pane.source) {
             Source.DEVICES -> listOf(CommanderCrumb(getString(R.string.devices), 0))
             Source.PHONE -> listOf(CommanderCrumb(getString(R.string.devices), -1), CommanderCrumb(phoneLabel, 0)) +
                 pane.phoneFolders.mapIndexed { i, folder ->
@@ -359,6 +365,9 @@ class MainActivity : ComponentActivity() {
                     CommanderCrumb(folder.name, i + 1 + if (deviceStorages.size > 1) 1 else 0)
                 }
         }
+        val path = folderPath + pane.zip?.let { zip ->
+            listOf(CommanderCrumb(zip.name, ZIP_DEPTH)) + zip.path.mapIndexed { i, name -> CommanderCrumb(name, ZIP_DEPTH + i + 1) }
+        }.orEmpty()
         return CommanderPane(
             title = when (pane.source) {
                 Source.DEVICES -> getString(R.string.devices)
@@ -372,11 +381,13 @@ class MainActivity : ComponentActivity() {
                 else if (pane.source == Source.DEVICES) pane.status.ifEmpty { getString(R.string.select_device) }
                 else pane.status,
             busy = pane.busy, canBack = canBack(pane),
-            pickable = pane.source == Source.PHONE && pane.phoneFolders.isNotEmpty() || pane.source == Source.DRIVE ||
+            // Zip files are read-only: their items can be copied out, not deleted.
+            pickable = if (pane.zip != null) mode != CommanderMode.DELETE
+                else pane.source == Source.PHONE && pane.phoneFolders.isNotEmpty() || pane.source == Source.DRIVE ||
                 pane.source == Source.USB ||
                 pane.source == Source.MTP && pane.storage != null,
             actionLabel = getString(if (pane.source == Source.PHONE && !phoneAccess()) R.string.grant_all_files else R.string.refresh),
-            navigationKey = "$index:${pane.source}:${pane.deviceName}:${pane.storage?.id}:${pane.folders.map { it.handle }}:${pane.phoneFolders.map { it.path }}:${pane.driveFolders.map { it.id }}:${pane.tree}:${pane.docFolders.map { it.id }}",
+            navigationKey = "$index:${pane.source}:${pane.deviceName}:${pane.storage?.id}:${pane.folders.map { it.handle }}:${pane.phoneFolders.map { it.path }}:${pane.driveFolders.map { it.id }}:${pane.tree}:${pane.docFolders.map { it.id }}:${pane.zip?.file}:${pane.zip?.path}",
             progress = pane.progress
         )
     }
@@ -386,6 +397,20 @@ class MainActivity : ComponentActivity() {
     private fun navigateTo(index: Int, depth: Int) {
         val pane = panes[index]
         if (pane.busy) return
+        pane.zip?.let { zip ->
+            if (depth >= ZIP_DEPTH) {
+                if (depth - ZIP_DEPTH < zip.path.size) {
+                    update(index) { it.copy(zip = zip.copy(path = zip.path.take(depth - ZIP_DEPTH))) }
+                    listZip(index)
+                }
+                return
+            }
+            // A crumb outside the zip leaves it; the folder that held it is listed again unless navigation lists another.
+            update(index) { it.copy(zip = null, revision = it.revision + 1) }
+            navigateTo(index, depth)
+            if (!panes[index].busy) listFolder(index)
+            return
+        }
         when (pane.source) {
             Source.DEVICES -> Unit
             Source.PHONE -> if (depth < 0) {
@@ -432,7 +457,18 @@ class MainActivity : ComponentActivity() {
 
     private fun openItem(index: Int, item: CommanderItem) {
         val pane = panes[index]
-        if (pane.busy || !item.directory) return
+        if (pane.busy) return
+        pane.zip?.let { zip ->
+            if (item.directory) {
+                update(index) { it.copy(zip = zip.copy(path = zip.path + item.name)) }
+                listZip(index)
+            }
+            return
+        }
+        if (!item.directory) {
+            if (ZipArchive.isZip(item.name)) openZip(index, item)
+            return
+        }
         when (pane.source) {
             Source.DEVICES -> if (item.id == "local:phone") {
                 update(index) { PaneState(source = Source.PHONE, revision = it.revision + 1) }
@@ -487,6 +523,12 @@ class MainActivity : ComponentActivity() {
     private fun goBack(index: Int) {
         val pane = panes[index]
         if (pane.busy) return
+        pane.zip?.let { zip ->
+            if (zip.path.isNotEmpty()) update(index) { it.copy(zip = zip.copy(path = zip.path.dropLast(1))) }
+            else update(index) { it.copy(zip = null, revision = it.revision + 1) }
+            listFolder(index)
+            return
+        }
         when (pane.source) {
             Source.DEVICES -> Unit
             Source.PHONE -> if (pane.phoneFolders.isEmpty()) update(index) { PaneState(revision = it.revision + 1) }
@@ -553,6 +595,7 @@ class MainActivity : ComponentActivity() {
 
     private fun listPhoneFolder(index: Int, completionStatus: String? = null) {
         val pane = panes[index]
+        if (pane.zip != null) return listZip(index, completionStatus)
         if (pane.source != Source.PHONE) return
         // The phone's own level is a fixed list that needs no file access.
         if (pane.phoneFolders.isEmpty()) {
@@ -594,6 +637,7 @@ class MainActivity : ComponentActivity() {
 
     private fun listDriveFolder(index: Int, completionStatus: String? = null) {
         val pane = panes[index]
+        if (pane.zip != null) return listZip(index, completionStatus)
         if (pane.source != Source.DRIVE) return
         val folder = pane.driveFolders.last()
         val revision = pane.revision + 1
@@ -762,6 +806,7 @@ class MainActivity : ComponentActivity() {
 
     private fun listUsbFolder(index: Int, completionStatus: String? = null) {
         val pane = panes[index]
+        if (pane.zip != null) return listZip(index, completionStatus)
         val tree = pane.tree ?: return
         if (pane.source != Source.USB) return
         val folder = pane.docFolders.last()
@@ -902,6 +947,7 @@ class MainActivity : ComponentActivity() {
 
     private fun listMtpFolder(index: Int, completionStatus: String? = null) {
         val pane = panes[index]
+        if (pane.zip != null) return listZip(index, completionStatus)
         val storage = pane.storage ?: return
         val name = pane.deviceName ?: return
         val path = pane.folders
@@ -955,6 +1001,7 @@ class MainActivity : ComponentActivity() {
             return
         }
         val root = panes[0]
+        if (root.zip != null) { update(0) { it.copy(status = getString(R.string.search_zip)) }; return }
         if (!writablePane(root) || root.source == Source.PHONE && !phoneAccess()) {
             update(0) { it.copy(status = getString(R.string.search_open_folder)) }; return
         }
@@ -980,6 +1027,7 @@ class MainActivity : ComponentActivity() {
         val index = newFolderPane
         val pane = panes[index]
         val name = newFolderName.trim()
+        if (pane.zip != null) { update(index) { it.copy(status = getString(R.string.zip_read_only)) }; return }
         if (!writablePane(pane)) {
             update(index) { it.copy(status = getString(R.string.mkdir_open_folder)) }; return
         }
@@ -1033,13 +1081,13 @@ class MainActivity : ComponentActivity() {
     }
 
     /** On the worker: copies [item] from an MTP device or Google Drive into the cache, reporting the fraction done. */
-    private fun cacheCopy(source: PaneState, item: CommanderItem, epoch: Int?, onProgress: (Float?) -> Unit): File {
+    private fun cacheCopy(source: PaneState, item: CommanderItem, epoch: Int?, into: File? = null,
+        onProgress: (Float?) -> Unit): File {
         check(source.deviceName == null || epoch == epochs[source.deviceName]) { getString(R.string.device_disconnected) }
         check(validName(item.name)) { getString(R.string.invalid_filename) }
         if (source.source == Source.DRIVE)
             check(driveFile(item).copyable) { getString(R.string.google_doc, item.name) }
-        // Only the file fetched last is kept; the app showing an earlier one has read it by now.
-        val folder = File(cacheDir, "open").apply { deleteRecursively(); mkdirs() }
+        val folder = into?.apply { mkdirs() } ?: openCache()
         val file = File(folder, item.name)
         var lastReport = 0L
         fetch(source, item, file) { copied, total ->
@@ -1052,6 +1100,9 @@ class MainActivity : ComponentActivity() {
         return file
     }
 
+    // Only the file opened last is kept; the app showing an earlier one has read it by now.
+    private fun openCache() = File(cacheDir, "open").apply { deleteRecursively(); mkdirs() }
+
     private val fileLabels by lazy {
         FileLabels(getString(R.string.view_header), getString(R.string.view_field), getString(R.string.view_value),
             getString(R.string.view_header_size), getString(R.string.view_protocol), getString(R.string.view_profile),
@@ -1063,10 +1114,11 @@ class MainActivity : ComponentActivity() {
     /** Shows what is in [item], found in [source] and shown in pane [index], in the viewer. */
     private fun viewFile(index: Int, item: CommanderItem, source: PaneState = panes[index]) {
         if (item.directory || panes[index].busy || source.source == Source.DEVICES) return
-        if (source.source == Source.PHONE && !phoneAccess()) {
+        val zip = source.zip
+        if (zip == null && source.source == Source.PHONE && !phoneAccess()) {
             update(index) { it.copy(status = getString(R.string.grant_view)) }; return
         }
-        val remote = source.source == Source.MTP || source.source == Source.DRIVE
+        val remote = zip == null && (source.source == Source.MTP || source.source == Source.DRIVE)
         if (remote && item.size > FileContents.FILE_LIMIT) {
             update(index) { it.copy(status = getString(R.string.too_large_to_view, item.name)) }; return
         }
@@ -1075,6 +1127,9 @@ class MainActivity : ComponentActivity() {
         viewing = FileView(item.name, busy = true)
         (if (remote) worker else local).execute {
             val result = runCatching {
+                if (zip != null) return@runCatching ZipArchive.read(zip.file, ZipArchive.path(item)) {
+                    FileContents.view(item.name, it, fileLabels)
+                }
                 when (source.source) {
                     Source.PHONE -> phoneItem(source, item).inputStream()
                     Source.USB -> contentResolver.openInputStream(
@@ -1098,6 +1153,7 @@ class MainActivity : ComponentActivity() {
      */
     private fun openFile(index: Int, item: CommanderItem, source: PaneState = panes[index]) {
         if (item.directory || panes[index].busy) return
+        source.zip?.let { zip -> return openZipFile(index, item, zip) }
         if (source.source == Source.PHONE && !phoneAccess()) {
             update(index) { it.copy(status = getString(R.string.grant_open)) }; return
         }
@@ -1127,6 +1183,23 @@ class MainActivity : ComponentActivity() {
                 }
             }
             Source.DEVICES -> Unit
+        }
+    }
+
+    /** Extracts [item] from [zip] into the cache and opens it in another app. */
+    private fun openZipFile(index: Int, item: CommanderItem, zip: ZipFolder) {
+        update(index) { it.copy(busy = true, status = getString(R.string.opening, item.name)) }
+        local.execute {
+            val result = runCatching {
+                check(validName(item.name)) { getString(R.string.invalid_filename) }
+                File(openCache(), item.name).also { ZipArchive.extract(zip.file, ZipArchive.path(item), it) }
+            }
+            runOnUiThread {
+                if (isDestroyed) return@runOnUiThread
+                update(index) { it.copy(busy = false) }
+                result.fold({ view(index, FileProvider.getUriForFile(this, "$packageName.files", it), item.name) },
+                    { e -> update(index) { it.copy(status = getString(R.string.could_not_open, item.name, e.message)) } })
+            }
         }
     }
 
@@ -1251,7 +1324,7 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun writablePane(pane: PaneState) = !pane.busy &&
+    private fun writablePane(pane: PaneState) = !pane.busy && pane.zip == null &&
         (pane.source == Source.PHONE && pane.phoneFolders.isNotEmpty() || pane.source == Source.USB || pane.source == Source.DRIVE || pane.source == Source.MTP && pane.storage != null)
 
     private fun unpick(key: String) { basket = basket.filter { it.key != key } }
@@ -1259,7 +1332,10 @@ class MainActivity : ComponentActivity() {
     /** Adds [items] to the basket, or takes them out again when all of them are in it already. */
     private fun pick(sourceIndex: Int, items: List<CommanderItem>, source: PaneState = panes[sourceIndex]) {
         if (items.isEmpty()) return
-        if (!writablePane(source)) {
+        if (source.zip != null && mode == CommanderMode.DELETE) {
+            update(sourceIndex) { it.copy(status = getString(R.string.zip_read_only)) }; return
+        }
+        if (!writablePane(source) && !(source.zip != null && !source.busy)) {
             update(sourceIndex) { it.copy(status = getString(R.string.pick_open_folder)) }; return
         }
         if (source.source == Source.PHONE && !phoneAccess()) {
@@ -1323,7 +1399,8 @@ class MainActivity : ComponentActivity() {
         val destination = panes[targetIndex]
         if (entries.isEmpty()) return
         if (!writablePane(destination)) {
-            update(shownIndex) { it.copy(status = getString(R.string.copy_open_target)) }; return
+            update(shownIndex) { it.copy(status = getString(if (destination.zip != null) R.string.zip_read_only
+                else R.string.copy_open_target)) }; return
         }
         if ((destination.source == Source.PHONE || entries.any { it.pane.source == Source.PHONE }) && !phoneAccess()) {
             update(shownIndex) { it.copy(status = getString(R.string.grant_copy)) }; return
@@ -1408,6 +1485,10 @@ class MainActivity : ComponentActivity() {
 
     /** Rejects copies that cannot work before anything existing at the destination is replaced. */
     private fun checkCopyable(source: PaneState, destination: PaneState, item: CommanderItem) {
+        if (source.zip != null) {
+            check(!item.directory || destination.source != Source.MTP) { getString(R.string.mtp_folder_copy) }
+            return
+        }
         check(source.source != Source.MTP || destination.source != Source.MTP) {
             getString(R.string.mtp_to_mtp)
         }
@@ -1461,15 +1542,74 @@ class MainActivity : ComponentActivity() {
     private fun finishPaneAction(sourceIndex: Int, targetIndex: Int?, status: String) {
         listOfNotNull(sourceIndex, targetIndex).forEach { index ->
             update(index) { it.copy(busy = false, progress = null, status = status) }
-            when (panes[index].source) {
-                Source.PHONE -> listPhoneFolder(index, status)
-                Source.MTP -> if (panes[index].storage != null) listMtpFolder(index, status)
-                Source.DRIVE -> listDriveFolder(index, status)
-                Source.USB -> listUsbFolder(index, status)
-                Source.DEVICES -> {}
+            listFolder(index, status)
+        }
+    }
+
+    /** Lists again whatever pane [index] shows: its folder, or the zip open in it. */
+    private fun listFolder(index: Int, completionStatus: String? = null) {
+        when (panes[index].source) {
+            Source.PHONE -> listPhoneFolder(index, completionStatus)
+            Source.MTP -> if (panes[index].storage != null) listMtpFolder(index, completionStatus)
+            Source.DRIVE -> listDriveFolder(index, completionStatus)
+            Source.USB -> listUsbFolder(index, completionStatus)
+            Source.DEVICES -> {}
+        }
+    }
+
+    /** Opens the zip file [item] like a folder; zips elsewhere than on the phone are copied into the cache first. */
+    private fun openZip(index: Int, item: CommanderItem) {
+        val source = panes[index]
+        if (source.source == Source.PHONE && !phoneAccess()) {
+            update(index) { it.copy(status = getString(R.string.grant_open)) }; return
+        }
+        // Copies of zips no pane or basket refers to any more are left over from earlier.
+        val inUse = (panes.mapNotNull { it.zip } + basket.mapNotNull { it.pane.zip }).map { it.file.parentFile }.toSet()
+        File(cacheDir, "zip").listFiles()?.filter { it !in inUse }?.forEach { it.deleteRecursively() }
+        val epoch = source.deviceName?.let { epochs[it] }
+        val revision = source.revision + 1
+        update(index) { it.copy(busy = true, revision = revision, status = getString(R.string.opening, item.name)) }
+        (if (source.source == Source.PHONE || source.source == Source.USB) local else worker).execute {
+            val result = runCatching {
+                val file = if (source.source == Source.PHONE) phoneItem(source, item)
+                    else cacheCopy(source, item, epoch, File(cacheDir, "zip/${System.nanoTime()}")) { fraction ->
+                        runOnUiThread {
+                            if (!isDestroyed && panes[index].revision == revision) update(index) { it.copy(progress = fraction) }
+                        }
+                    }
+                file to ZipArchive.list(file, "")
+            }
+            runOnUiThread {
+                if (isDestroyed || panes[index].revision != revision) return@runOnUiThread
+                result.fold({ (file, entries) ->
+                    update(index) { it.copy(zip = ZipFolder(file, item.name), entries = entries, busy = false,
+                        progress = null, revision = revision + 1, status = itemCount(entries)) }
+                }, { e ->
+                    update(index) { it.copy(busy = false, progress = null, status = if (source.source == Source.DRIVE)
+                        driveError(e) else getString(R.string.could_not_open, item.name, e.message)) }
+                })
             }
         }
     }
+
+    /** Lists the folder open in pane [index]'s zip. */
+    private fun listZip(index: Int, completionStatus: String? = null) {
+        val zip = panes[index].zip ?: return
+        val revision = panes[index].revision + 1
+        update(index) { it.copy(revision = revision, busy = true, entries = emptyList(), status = getString(R.string.reading)) }
+        local.execute {
+            val result = runCatching { ZipArchive.list(zip.file, zip.path.joinToString("/")) }
+            runOnUiThread {
+                if (isDestroyed || panes[index].revision != revision) return@runOnUiThread
+                update(index) { it.copy(entries = result.getOrNull() ?: emptyList(), busy = false,
+                    status = result.fold({ completionStatus ?: itemCount(it) },
+                        { e -> getString(R.string.could_not_read, zip.name, e.message) })) }
+            }
+        }
+    }
+
+    private fun itemCount(entries: List<CommanderItem>) = if (entries.isEmpty()) getString(R.string.folder_empty)
+        else resources.getQuantityString(R.plurals.items, entries.size, entries.size)
 
     private fun validName(name: String) = name.isNotBlank() && name == name.trim() &&
         name != "." && name != ".." && name.none { it == '/' || it == '\\' || it == '\u0000' }
@@ -1591,6 +1731,23 @@ class MainActivity : ComponentActivity() {
     /** [onStage] names the current step when a copy has to pass through a temporary file. */
     private fun copyEntry(source: PaneState, target: PaneState, item: CommanderItem,
         onStage: (String) -> Unit = {}, onProgress: (Long, Long) -> Unit = { _, _ -> }) {
+        source.zip?.let { zip ->
+            check(validName(item.name)) { getString(R.string.invalid_filename) }
+            if (target.source == Source.PHONE) {
+                check(phoneAccess()) { getString(R.string.phone_access_revoked) }
+                ZipArchive.extract(zip.file, ZipArchive.path(item), phoneChild(target, item.name), onProgress)
+                return
+            }
+            val staging = File(cacheDir, "transfer").apply { deleteRecursively(); mkdirs() }
+            val temp = File(staging, item.name)
+            try {
+                onStage(getString(R.string.stage_reading))
+                ZipArchive.extract(zip.file, ZipArchive.path(item), temp, onProgress)
+                onStage(getString(R.string.stage_writing))
+                put(target, temp, onProgress)
+            } finally { staging.deleteRecursively() }
+            return
+        }
         check(source.source != target.source || when (source.source) {
             Source.PHONE -> source.phoneFolders.last() != target.phoneFolders.last()
             Source.DRIVE -> source.driveFolders.last() != target.driveFolders.last()
