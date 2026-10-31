@@ -184,4 +184,6 @@
     <string name="same_folder">コピー元とコピー先が同じフォルダです</string>
     <string name="folder_into_itself">フォルダをそのフォルダ自身の中にコピーすることはできません</string>
     <string name="device_disconnected_reconnect">デバイスが切断されました。接続し直してから、もう一度選択してください。</string>
+    <string name="zip_read_only">ZIP ファイルは読み取り専用で開きます。代わりにファイルを外へコピーしてください。</string>
+    <string name="search_zip">ZIP ファイルの中は検索されません。先に ZIP を閉じてください。</string>
 </resources>

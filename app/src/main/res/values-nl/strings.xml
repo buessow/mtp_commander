@@ -189,4 +189,6 @@
     <string name="same_folder">Bron en doel zijn dezelfde map</string>
     <string name="folder_into_itself">Kan een map niet in zichzelf kopiëren</string>
     <string name="device_disconnected_reconnect">Apparaat losgekoppeld. Sluit het opnieuw aan en kies het opnieuw.</string>
+    <string name="zip_read_only">Zipbestanden openen alleen-lezen. Kopieer er in plaats daarvan bestanden uit.</string>
+    <string name="search_zip">Zoeken kijkt niet in zipbestanden. Verlaat eerst het zipbestand.</string>
 </resources>

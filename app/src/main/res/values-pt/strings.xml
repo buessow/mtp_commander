@@ -194,4 +194,6 @@
     <string name="same_folder">Origem e destino são a mesma pasta</string>
     <string name="folder_into_itself">Não é possível copiar uma pasta para dentro de si mesma</string>
     <string name="device_disconnected_reconnect">Dispositivo desligado. Volte a ligá-lo e selecione-o novamente.</string>
+    <string name="zip_read_only">Os ficheiros zip abrem só de leitura. Copie os ficheiros para fora deles.</string>
+    <string name="search_zip">A pesquisa não procura dentro de ficheiros zip. Saia primeiro do zip.</string>
 </resources>

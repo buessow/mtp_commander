@@ -194,4 +194,6 @@
     <string name="same_folder">Origine e destinazione sono la stessa cartella</string>
     <string name="folder_into_itself">Impossibile copiare una cartella in se stessa</string>
     <string name="device_disconnected_reconnect">Dispositivo scollegato. Ricollegalo e selezionalo di nuovo.</string>
+    <string name="zip_read_only">I file zip si aprono in sola lettura. Copia invece i file fuori da essi.</string>
+    <string name="search_zip">La ricerca non guarda dentro i file zip. Esci prima dallo zip.</string>
 </resources>

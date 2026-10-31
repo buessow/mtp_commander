@@ -189,4 +189,6 @@
     <string name="same_folder">Quelle und Ziel sind derselbe Ordner</string>
     <string name="folder_into_itself">Ein Ordner kann nicht in sich selbst kopiert werden</string>
     <string name="device_disconnected_reconnect">Gerät getrennt. Schliesse es wieder an und wähle es erneut.</string>
+    <string name="zip_read_only">Zip-Dateien sind schreibgeschützt. Kopiere stattdessen Dateien aus ihnen heraus.</string>
+    <string name="search_zip">Die Suche schaut nicht in Zip-Dateien. Verlasse zuerst die Zip-Datei.</string>
 </resources>

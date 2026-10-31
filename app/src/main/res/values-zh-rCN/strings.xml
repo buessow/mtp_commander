@@ -184,4 +184,6 @@
     <string name="same_folder">来源和目标是同一个文件夹</string>
     <string name="folder_into_itself">无法将文件夹复制到其自身中</string>
     <string name="device_disconnected_reconnect">设备已断开连接。请重新连接并再次选择它。</string>
+    <string name="zip_read_only">ZIP 文件以只读方式打开。请改为将文件复制出来。</string>
+    <string name="search_zip">搜索不会查找 ZIP 文件内部。请先退出 ZIP 文件。</string>
 </resources>

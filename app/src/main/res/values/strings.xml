@@ -191,4 +191,6 @@
     <string name="same_folder">Source and destination are the same folder</string>
     <string name="folder_into_itself">Cannot copy a folder into itself</string>
     <string name="device_disconnected_reconnect">Device disconnected. Reconnect and select it again.</string>
+    <string name="zip_read_only">Zip files open read-only. Copy files out of them instead.</string>
+    <string name="search_zip">Search does not look inside zip files. Leave the zip first.</string>
 </resources>

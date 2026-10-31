@@ -194,4 +194,6 @@
     <string name="same_folder">La source et la destination sont le même dossier</string>
     <string name="folder_into_itself">Impossible de copier un dossier dans lui-même</string>
     <string name="device_disconnected_reconnect">Appareil déconnecté. Rebranchez-le et sélectionnez-le à nouveau.</string>
+    <string name="zip_read_only">Les fichiers zip s\'ouvrent en lecture seule. Copiez plutôt des fichiers vers l\'extérieur.</string>
+    <string name="search_zip">La recherche ne regarde pas dans les fichiers zip. Quittez d\'abord le zip.</string>
 </resources>
