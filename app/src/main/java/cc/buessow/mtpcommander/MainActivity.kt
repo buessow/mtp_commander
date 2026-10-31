@@ -96,6 +96,7 @@ class MainActivity : ComponentActivity() {
     // Raw upload sessions share a device's MtpDevice connection for the duration of one copy batch.
     private val rawSessions = mutableMapOf<String, RawMtpUploader.Session>()
     private val epochs = ConcurrentHashMap<String, Int>()
+    // Devices waiting for USB access or for their MTP session to open; main thread only.
     private val pendingDeviceNames = mutableSetOf<String>()
     // Drive requests run here so that network waits never hold up USB transfers on the worker.
     private val network = Executors.newSingleThreadExecutor()
@@ -184,7 +185,6 @@ class MainActivity : ComponentActivity() {
                 ACTION_USB_PERMISSION -> {
                     val device = intent.usbDevice() ?: return
                     if (!pendingDeviceNames.remove(device.deviceName)) return
-                    if (panes.none { it.deviceName == device.deviceName }) return
                     if (intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false) &&
                         usbManager.deviceList.containsKey(device.deviceName)) openDevice(device)
                     else failDevice(device.deviceName, "USB access denied or device disconnected. Select the device to retry.")
@@ -649,12 +649,15 @@ class MainActivity : ComponentActivity() {
             }
         }.sortedBy { it.deviceName }
         val connected = devices.mapTo(mutableSetOf()) { it.deviceName }
+        val attached = devices.filter { it.deviceName !in identities }
         identities = identities.filterKeys { it in connected } + devices.filter { it.deviceName !in identities }
             .associate { it.deviceName to DeviceIdentity(it.vendorId == GARMIN_VENDOR_ID,
                 it.productName?.trim()?.takeIf(String::isNotEmpty)) }
         val missing = (panes.mapNotNull { it.deviceName } + readyDevices + pendingDeviceNames)
             .filter { it !in connected }.toSet()
         missing.forEach(::disconnect)
+        // Connecting right away reads the model, e.g. a Wahoo's, for the Devices list before the device is opened.
+        attached.forEach(::connect)
         massStorageCount = usbManager.deviceList.values.count { device ->
             activeInterfaces(device).any { it.interfaceClass == UsbConstants.USB_CLASS_MASS_STORAGE }
         }
@@ -781,11 +784,12 @@ class MainActivity : ComponentActivity() {
         if (!usbManager.deviceList.containsKey(device.deviceName)) { refreshDevices(); return }
         update(index) { PaneState(source = Source.MTP, deviceName = device.deviceName,
             busy = true, status = "Connecting…", revision = it.revision + 1) }
-        if (device.deviceName in readyDevices) {
-            showStorages(index)
-            return
-        }
-        if (device.deviceName in pendingDeviceNames) return
+        if (device.deviceName in readyDevices) showStorages(index) else connect(device)
+    }
+
+    /** Opens an MTP session with [device], asking for USB access first; panes showing it follow along. */
+    private fun connect(device: UsbDevice) {
+        if (device.deviceName in readyDevices || device.deviceName in pendingDeviceNames) return
         if (usbManager.hasPermission(device)) openDevice(device)
         else {
             pendingDeviceNames += device.deviceName
@@ -805,6 +809,7 @@ class MainActivity : ComponentActivity() {
     private fun openDevice(device: UsbDevice) {
         val name = device.deviceName
         val epoch = bumpEpoch(name)
+        pendingDeviceNames += name
         worker.execute {
             if (epoch != epochs[name]) return@execute
             try {
@@ -829,6 +834,7 @@ class MainActivity : ComponentActivity() {
                     ?: session.deviceInfo?.model?.trim()?.takeIf { it.isNotEmpty() }
                 runOnUiThread {
                     if (epoch == epochs[name] && !isDestroyed) {
+                        pendingDeviceNames -= name
                         identities = identities + (name to DeviceIdentity(garmin, model ?: identities[name]?.model))
                         storages = storages + (name to found)
                         readyDevices = readyDevices + name
@@ -839,6 +845,7 @@ class MainActivity : ComponentActivity() {
                 closeSession(name)
                 runOnUiThread {
                     if (epoch == epochs[name] && !isDestroyed) {
+                        pendingDeviceNames -= name
                         readyDevices = readyDevices - name
                         storages = storages - name
                         failDevice(name, "MTP connection failed: ${e.message}. Select the device to retry.")
