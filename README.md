@@ -4,7 +4,7 @@ A two-pane Android file manager for copying files between your phone, devices pl
 cameras, USB drives) and your own Google Drive.
 
 Website and user guide: https://buessow.github.io/mtp_commander/ ·
-[Privacy policy](https://buessow.github.io/mtp_commander/privacy)
+[Privacy policy](https://buessow.github.io/mtp_commander/privacy) · [Terms of service](https://buessow.github.io/mtp_commander/terms)
 
 <p>
   <img src="docs/images/two_panes.png" width="200" alt="Phone and watch side by side">
@@ -80,7 +80,7 @@ A new client can take a few minutes to start working.
 Push to the `production` branch. The [release workflow](.github/workflows/release.yml) builds a signed APK and AAB and
 attaches them to a GitHub release.
 
-The Play Store listing is in [`fastlane/metadata/android`](fastlane/metadata/android); the website and privacy policy are
+The Play Store listing is in [`fastlane/metadata/android`](fastlane/metadata/android); the website, privacy policy and terms of service are
 in [`docs/`](docs).
 
 ## License
