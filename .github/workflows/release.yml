@@ -14,6 +14,8 @@ permissions:
 
 jobs:
   build:
+    # A manual run can be started on any branch; only production releases.
+    if: github.ref == 'refs/heads/production'
     runs-on: ubuntu-latest
     environment: production
     steps:
