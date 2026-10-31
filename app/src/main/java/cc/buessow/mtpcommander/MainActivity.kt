@@ -322,14 +322,15 @@ class MainActivity : ComponentActivity() {
         val entries = when (pane.source) {
             Source.DEVICES -> listOf(CommanderItem("local:phone", phoneLabel, true, -1, 0),
                 CommanderItem("local:drive", DRIVE_LABEL, true, -1, 0)) +
-                drives.map { (uri, label) -> CommanderItem("tree:$uri", label, true, -1, 0) } +
+                // Drives and MTP devices are plugged in, unlike the phone and Drive; "(USB)" tells them apart.
+                drives.map { (uri, label) -> CommanderItem("tree:$uri", "$label (USB)", true, -1, 0) } +
                 ungrantedVolumes.map { CommanderItem("tree:new:$it", "USB drive · tap to allow access", true, -1, 0) } +
                 // Without the mount table, fall back to counting USB drives.
                 (if (ungrantedVolumes.isEmpty() && massStorageCount > drives.size) listOf(CommanderItem("tree:",
                     "USB drive · tap to allow access", true, -1, 0)) else emptyList()) +
                 devices.map { device ->
-                    CommanderItem(device.deviceName, identities[device.deviceName]?.let(::deviceModelLabel)
-                        ?: device.productName ?: "MTP device", true, -1, 0)
+                    CommanderItem(device.deviceName, (identities[device.deviceName]?.let(::deviceModelLabel)
+                        ?: device.productName ?: "MTP device") + " (USB)", true, -1, 0)
                 }
             Source.PHONE -> if (pane.phoneFolders.isEmpty()) listOf(CommanderItem("phone:", "Storage", true, -1, 0)) +
                 phoneShortcuts.map { (folder, label) -> CommanderItem("phone:$folder", label, true, -1, 0) }
