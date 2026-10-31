@@ -7,8 +7,18 @@ import com.garmin.fit.Manufacturer
 import com.garmin.fit.MesgNum
 import java.io.ByteArrayInputStream
 
-/** Names Garmin devices from GARMIN/Device.fit, whose file_id record carries the product number. */
+/**
+ * Names Garmin devices from GARMIN/GarminDevice.xml, which spells out the model, or GARMIN/Device.fit, whose file_id
+ * record carries the product number.
+ */
 internal object GarminModel {
+    /** A name like "Garmin inReach Mini 2" from the model description in GarminDevice.xml. */
+    fun fromDeviceXml(xml: String): String? {
+        val description = Regex("<Model>.*?<Description>([^<]*)</Description>", RegexOption.DOT_MATCHES_ALL)
+            .find(xml)?.groupValues?.get(1)?.replace("&amp;", "&")?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+        return if (description.startsWith("Garmin", ignoreCase = true)) description else "Garmin $description"
+    }
+
     /** The product number in a FIT file's file_id record, or null if it is not a Garmin device. */
     fun productId(fit: ByteArray): Int? {
         var fileId: FileIdMesg? = null

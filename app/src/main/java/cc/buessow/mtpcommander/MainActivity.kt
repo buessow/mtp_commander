@@ -671,7 +671,7 @@ class MainActivity : ComponentActivity() {
         val open = panes.mapNotNull { it.tree }.toSet()
         local.execute {
             val mounted = granted.mapNotNull { uri -> trees.name(uri)?.let { label ->
-                uri to (driveModels.getOrPut(uri) { garminModel(uri) ?: wahooModel(uri) } ?: label)
+                uri to (driveModels.getOrPut(uri) { driveModel(uri) } ?: label)
             } }
             driveModels.keys.retainAll(mounted.map { it.first }.toSet())
             val grantedVolumes = mounted.map { trees.rootId(it.first).substringBefore(':') }.toSet()
@@ -697,28 +697,45 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    /** On the local executor: a Garmin in USB drive mode names its model in GARMIN/Device.fit. */
-    private fun garminModel(tree: Uri): String? = runCatching {
-        val garmin = trees.list(tree, trees.rootId(tree))
-            .firstOrNull { it.folder && it.name.equals("GARMIN", ignoreCase = true) } ?: return null
-        val fit = trees.list(tree, garmin.id)
-            .firstOrNull { !it.folder && it.name.equals("Device.fit", ignoreCase = true) } ?: return null
-        GarminModel.productId(trees.read(tree, fit.id, 64 * 1024))?.let { GarminModel.name(it) }
+    /**
+     * On the local executor: the model a drive names in its files. Garmins write GarminDevice.xml, or at least
+     * Device.fit, into GARMIN; Wahoos write system_info.txt into the root.
+     */
+    private fun driveModel(tree: Uri): String? =
+        treeFile(tree, listOf("GARMIN", "GarminDevice.xml"), 64 * 1024)?.let { GarminModel.fromDeviceXml(String(it)) }
+            ?: treeFile(tree, listOf("GARMIN", "Device.fit"), 64 * 1024)
+                ?.let { GarminModel.productId(it) }?.let { GarminModel.name(it) }
+            ?: treeFile(tree, listOf(WahooModel.FILE), 4096)?.let { WahooModel.name(String(it, Charsets.US_ASCII)) }
+
+    /** On the local executor: the file at [path] below the drive's root, or null if it is missing or over [limit]. */
+    private fun treeFile(tree: Uri, path: List<String>, limit: Int): ByteArray? = runCatching {
+        var parent = trees.rootId(tree)
+        path.forEachIndexed { i, name ->
+            parent = trees.list(tree, parent).firstOrNull { it.folder == (i < path.lastIndex) &&
+                it.name.equals(name, ignoreCase = true) }?.id ?: return null
+        }
+        trees.read(tree, parent, limit)
     }.getOrNull()
 
-    /** On the local executor: a Wahoo names its hardware in system_info.txt at the root of the drive. */
-    private fun wahooModel(tree: Uri): String? = runCatching {
-        val info = trees.list(tree, trees.rootId(tree))
-            .firstOrNull { !it.folder && it.name.equals(WahooModel.FILE, ignoreCase = true) } ?: return null
-        WahooModel.name(String(trees.read(tree, info.id, 4096), Charsets.US_ASCII))
-    }.getOrNull()
+    /** On the worker: the same for a device connected over MTP, looking below the root of [storageId]. */
+    private fun mtpModel(session: MtpDevice, storageId: Int): String? =
+        mtpFile(session, storageId, listOf("GARMIN", "GarminDevice.xml"), 64 * 1024)
+            ?.let { GarminModel.fromDeviceXml(String(it)) }
+            ?: mtpFile(session, storageId, listOf(WahooModel.FILE), 4096)
+                ?.let { WahooModel.name(String(it, Charsets.US_ASCII)) }
 
-    /** On the worker: the same for a Wahoo connected over MTP, looking at the root of [storageId]. */
-    private fun wahooModel(session: MtpDevice, storageId: Int): String? = runCatching {
-        val info = session.getObjectHandles(storageId, 0, -1)?.asSequence()?.mapNotNull(session::getObjectInfo)
-            ?.firstOrNull { it.parent == 0 && it.name.equals(WahooModel.FILE, ignoreCase = true) &&
-                it.compressedSize in 1..4096 } ?: return null
-        session.getObject(info.objectHandle, info.compressedSize)?.let { WahooModel.name(String(it, Charsets.US_ASCII)) }
+    /** On the worker: the file at [path] below the root of [storageId], or null if it is missing or over [limit]. */
+    private fun mtpFile(session: MtpDevice, storageId: Int, path: List<String>, limit: Int): ByteArray? = runCatching {
+        var parent = -1
+        var info: MtpObjectInfo? = null
+        for (name in path) {
+            val handles = session.getObjectHandles(storageId, 0, parent) ?: return null
+            info = handles.asSequence().mapNotNull(session::getObjectInfo).firstOrNull {
+                it.parent == (if (parent == -1) 0 else parent) && it.name.equals(name, ignoreCase = true)
+            } ?: return null
+            parent = info.objectHandle
+        }
+        info?.takeIf { it.compressedSize in 1..limit }?.let { session.getObject(it.objectHandle, it.compressedSize) }
     }.getOrNull()
 
     /**
@@ -829,7 +846,7 @@ class MainActivity : ComponentActivity() {
                 } ?: emptyList()
                 android.util.Log.i("AndroidMTP", "MTP storages: ${found.map { it.id }}")
                 val garmin = device.vendorId == GARMIN_VENDOR_ID
-                val model = found.firstNotNullOfOrNull { wahooModel(session, it.id) }
+                val model = found.firstNotNullOfOrNull { mtpModel(session, it.id) }
                     ?: device.productName?.trim()?.takeIf { it.isNotEmpty() }
                     ?: session.deviceInfo?.model?.trim()?.takeIf { it.isNotEmpty() }
                 runOnUiThread {
