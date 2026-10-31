@@ -71,6 +71,8 @@ import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.res.pluralStringResource
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -209,10 +211,10 @@ internal fun CommanderScreen(
     if (showPhoneAccessExplanation) {
         AlertDialog(
             onDismissRequest = onDismissPhoneAccess,
-            title = { Text("Browse phone storage") },
-            text = { Text("To show files in the phone's shared storage without choosing folders one by one, MTP Commander needs all-files access. In Settings, enable ‘Allow access to manage all files’ for this app. Browsing is read-only; you can continue using an MTP device if you decline.") },
-            confirmButton = { TextButton(onClick = onConfirmPhoneAccess) { Text("Open Settings") } },
-            dismissButton = { TextButton(onClick = onDismissPhoneAccess) { Text("Not now") } }
+            title = { Text(stringResource(R.string.phone_access_title)) },
+            text = { Text(stringResource(R.string.phone_access_text)) },
+            confirmButton = { TextButton(onClick = onConfirmPhoneAccess) { Text(stringResource(R.string.open_settings)) } },
+            dismissButton = { TextButton(onClick = onDismissPhoneAccess) { Text(stringResource(R.string.not_now)) } }
         )
     }
     // In landscape the copy target sits to the right and the title shares a row with the tool buttons.
@@ -231,12 +233,12 @@ internal fun CommanderScreen(
     val tools: @Composable (Modifier) -> Unit = { modifier ->
         Row(modifier.border(BorderStroke(0.5.dp, divider))) {
             listOf(
-                ToolButton("Copy", "▣", mode == CommanderMode.COPY) { onMode(CommanderMode.COPY) },
-                ToolButton("Delete", "×", mode == CommanderMode.DELETE) { onMode(CommanderMode.DELETE) },
-                ToolButton("Open", "↗", mode == CommanderMode.OPEN) { onMode(CommanderMode.OPEN) },
-                ToolButton("View", "≡", mode == CommanderMode.VIEW) { onMode(CommanderMode.VIEW) },
-                ToolButton("Search", "⌕", search.active, onSearchToggle),
-                ToolButton("New folder", "+", newFolder.active, onNewFolderToggle)
+                ToolButton(stringResource(R.string.tool_copy), "▣", mode == CommanderMode.COPY) { onMode(CommanderMode.COPY) },
+                ToolButton(stringResource(R.string.tool_delete), "×", mode == CommanderMode.DELETE) { onMode(CommanderMode.DELETE) },
+                ToolButton(stringResource(R.string.tool_open), "↗", mode == CommanderMode.OPEN) { onMode(CommanderMode.OPEN) },
+                ToolButton(stringResource(R.string.tool_view), "≡", mode == CommanderMode.VIEW) { onMode(CommanderMode.VIEW) },
+                ToolButton(stringResource(R.string.tool_search), "⌕", search.active, onSearchToggle),
+                ToolButton(stringResource(R.string.tool_new_folder), "+", newFolder.active, onNewFolderToggle)
             ).forEachIndexed { index, (label, icon, on, onClick) ->
                 Column(Modifier.weight(1f).height(56.dp)
                     .onGloballyPositioned { buttonBounds[index] = it.boundsInRoot() }
@@ -267,7 +269,7 @@ internal fun CommanderScreen(
             key(index, pane.navigationKey) {
                 Pane(
                     listState = listStates.getOrPut(pane.navigationKey) { LazyListState() },
-                    title = if (index == 1) "TO ${pane.title}" else pane.title,
+                    title = if (index == 1) stringResource(R.string.copy_target_title, pane.title) else pane.title,
                     symbol = if (index == 0) "▯" else "▣", path = pane.path,
                     entries = remember(pane.entries, sort) { sort.apply(pane.entries) }, sort = sort, onSort = onSort,
                     isActive = activePane == index, isBusy = pane.busy, progress = pane.progress,
@@ -297,19 +299,14 @@ internal fun CommanderScreen(
     // The help sits between the tool buttons and the list, which makes room for it, and points at its tool.
     val help = @Composable {
         if (balloon != null && !balloonHidden) {
-            val target = if (wide) "on the right" else "below"
-            val message = when (balloon) {
-                "view-1" -> "Tap a text or FIT file to see what is in it. FIT files show their header and a table " +
-                    "for each kind of message."
-                "open-1" -> "Tap a file to open it in another app. Files on a watch or in Google Drive are copied to " +
-                    "the phone first."
-                "search-copy-3" -> "Tick search results to copy them. Open the folder to copy into in the list $target, " +
-                    "then press COPY."
-                "search-delete-3" -> "Tick search results to delete them. Nothing is deleted until you press DELETE."
-                "copy-5" -> "Tick files to copy them, or hold a file or folder. Open the folder to copy into in the list " +
-                    "$target, then press COPY."
-                else -> "Tick files to delete them, or hold a file or folder. Nothing is deleted until you press DELETE."
-            }
+            val message = stringResource(when (balloon) {
+                "view-1" -> R.string.help_view
+                "open-1" -> R.string.help_open
+                "search-copy-3" -> if (wide) R.string.help_search_copy_right else R.string.help_search_copy_below
+                "search-delete-3" -> R.string.help_search_delete
+                "copy-5" -> if (wide) R.string.help_copy_right else R.string.help_copy_below
+                else -> R.string.help_delete
+            })
             var left by remember { mutableStateOf(0f) }
             val arrowFill = ink
             Column(Modifier.fillMaxWidth().onGloballyPositioned { left = it.boundsInRoot().left }
@@ -323,7 +320,7 @@ internal fun CommanderScreen(
                 Column(Modifier.padding(horizontal = 12.dp).fillMaxWidth()
                     .background(ink, RoundedCornerShape(8.dp)).padding(12.dp)) {
                     Text(message, color = paper, fontSize = 13.sp)
-                    Text("TAP TO HIDE", color = paper.copy(alpha = 0.75f), fontSize = 9.sp, letterSpacing = 0.5.sp,
+                    Text(stringResource(R.string.tap_to_hide), color = paper.copy(alpha = 0.75f), fontSize = 9.sp, letterSpacing = 0.5.sp,
                         modifier = Modifier.padding(top = 6.dp))
                 }
             }
@@ -382,11 +379,11 @@ private fun SearchPanel(search: SearchState, onQuery: (String) -> Unit, onSearch
     val focus = remember { FocusRequester() }
     LaunchedEffect(Unit) { focus.requestFocus() }
     Column(modifier.background(paper)) {
-        PanelHeader("⌕", "SEARCH", search.root)
+        PanelHeader("⌕", stringResource(R.string.search_title), search.root)
         OutlinedTextField(search.query, onQuery,
             Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 6.dp).focusRequester(focus),
-            singleLine = true, placeholder = { Text("Name or pattern, e.g. *.fit") },
-            trailingIcon = { TextButton(onClick = onSearch) { Text("SEARCH", color = accent, fontWeight = FontWeight.Bold) } },
+            singleLine = true, placeholder = { Text(stringResource(R.string.search_placeholder)) },
+            trailingIcon = { TextButton(onClick = onSearch) { Text(stringResource(R.string.search_button), color = accent, fontWeight = FontWeight.Bold) } },
             // File names and patterns are not words; autocorrect turns "img" into "omg".
             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search, autoCorrectEnabled = false,
                 capitalization = KeyboardCapitalization.None, keyboardType = KeyboardType.Uri),
@@ -411,8 +408,7 @@ private fun SearchPanel(search: SearchState, onQuery: (String) -> Unit, onSearch
                 Spacer(Modifier.fillMaxWidth().height(0.5.dp).background(divider.copy(alpha = 0.5f)))
             }
             if (search.hits.isEmpty() && !search.busy) item {
-                Text("Searches all subfolders. Text matches any part of a name. Use * for any characters and ? for " +
-                    "one character; a pattern must then match the whole name. Case is ignored.",
+                Text(stringResource(R.string.search_help),
                     Modifier.padding(horizontal = 16.dp, vertical = 8.dp), color = muted, fontSize = 12.sp)
             }
         }
@@ -432,9 +428,9 @@ private fun NewFolderInput(state: NewFolderState, onName: (String) -> Unit, onCr
     LaunchedEffect(Unit) { focus.requestFocus() }
     OutlinedTextField(state.name, onName,
         Modifier.fillMaxWidth().background(paper).padding(horizontal = 10.dp, vertical = 6.dp).focusRequester(focus),
-        singleLine = true, placeholder = { Text("New folder in ${state.location}", maxLines = 1,
+        singleLine = true, placeholder = { Text(stringResource(R.string.new_folder_placeholder, state.location), maxLines = 1,
             overflow = TextOverflow.Ellipsis) },
-        trailingIcon = { TextButton(onClick = onCreate) { Text("CREATE", color = accent, fontWeight = FontWeight.Bold) } },
+        trailingIcon = { TextButton(onClick = onCreate) { Text(stringResource(R.string.create), color = accent, fontWeight = FontWeight.Bold) } },
         keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done, autoCorrectEnabled = false,
             capitalization = KeyboardCapitalization.None),
         keyboardActions = KeyboardActions(onDone = { onCreate() }), colors = inputColors)
@@ -456,7 +452,7 @@ private fun Viewer(view: FileView, onClose: () -> Unit) {
                 Modifier.fillMaxWidth().height(4.dp), color = accent, trackColor = divider)
             Row(Modifier.padding(18.dp), verticalAlignment = Alignment.CenterVertically) {
                 CircularProgressIndicator(Modifier.size(16.dp), color = accent, strokeWidth = 2.dp)
-                Text("Reading…", Modifier.padding(start = 10.dp), color = muted, fontSize = 12.sp)
+                Text(stringResource(R.string.reading), Modifier.padding(start = 10.dp), color = muted, fontSize = 12.sp)
             }
         }
         view.message?.let { Text(it, Modifier.padding(horizontal = 12.dp, vertical = 8.dp), color = muted, fontSize = 12.sp) }
@@ -543,15 +539,15 @@ private fun ExecuteBar(copy: Boolean, selection: List<CommanderItem>, onExecute:
     Row(Modifier.fillMaxWidth().height(IntrinsicSize.Min)) {
         Box(Modifier.width(96.dp).fillMaxHeight().heightIn(min = 48.dp).border(BorderStroke(0.5.dp, divider))
             .clickable(enabled = enabled, onClick = onClear), contentAlignment = Alignment.Center) {
-            Text("CLEAR", Modifier.padding(vertical = 8.dp), color = if (enabled) ink else muted, fontSize = 13.sp,
+            Text(stringResource(R.string.clear), Modifier.padding(vertical = 8.dp), color = if (enabled) ink else muted, fontSize = 13.sp,
                 fontWeight = FontWeight.Bold, letterSpacing = 0.8.sp, textAlign = TextAlign.Center)
         }
         Box(Modifier.weight(1f).fillMaxHeight().heightIn(min = 48.dp)
             .background(if (enabled) color else divider)
             .clickable(enabled = enabled, onClick = onExecute), contentAlignment = Alignment.Center) {
-            val verb = if (copy) "COPY" else "DELETE"
-            Text(if (busy && selection.isNotEmpty()) "${if (copy) "COPYING" else "DELETING"}…"
-                else "$verb ${selectionLabel(LocalContext.current, selection)}",
+            val label = selectionLabel(LocalContext.current, selection)
+            Text(if (busy && selection.isNotEmpty()) stringResource(if (copy) R.string.copying_busy else R.string.deleting_busy)
+                else stringResource(if (copy) R.string.execute_copy else R.string.execute_delete, label),
                 Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
                 color = onColor, fontSize = 13.sp, fontWeight = FontWeight.Bold, letterSpacing = 0.8.sp,
                 textAlign = TextAlign.Center, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -563,9 +559,9 @@ private fun ExecuteBar(copy: Boolean, selection: List<CommanderItem>, onExecute:
 private fun selectionLabel(context: android.content.Context, selection: List<CommanderItem>): String {
     val files = selection.filter { !it.directory }
     val folders = selection.size - files.size
-    fun count(n: Int, noun: String) = "$n $noun${if (n == 1) "" else "S"}"
-    return listOfNotNull(count(files.size, "FILE").takeIf { files.isNotEmpty() || folders == 0 },
-        count(folders, "FOLDER").takeIf { folders > 0 }).joinToString(" + ") +
+    fun count(id: Int, n: Int) = context.resources.getQuantityString(id, n, n)
+    return listOfNotNull(count(R.plurals.selection_files, files.size).takeIf { files.isNotEmpty() || folders == 0 },
+        count(R.plurals.selection_folders, folders).takeIf { folders > 0 }).joinToString(" + ") +
         " · " + Formatter.formatShortFileSize(context, files.sumOf { it.size.coerceAtLeast(0) })
 }
 
@@ -620,9 +616,9 @@ private fun Pane(
         Row(Modifier.fillMaxWidth().height(23.dp).border(BorderStroke(0.5.dp, divider)),
             verticalAlignment = Alignment.CenterVertically) {
             Spacer(Modifier.width(10.dp))
-            ColumnLabel("NAME", Modifier.weight(1f), sort, SortKey.NAME, onSort)
-            ColumnLabel("SIZE", Modifier.width(60.dp), sort, SortKey.SIZE, onSort, TextAlign.End)
-            ColumnLabel("DATE", Modifier.width(72.dp), sort, SortKey.DATE, onSort, TextAlign.End)
+            ColumnLabel(stringResource(R.string.column_name), Modifier.weight(1f), sort, SortKey.NAME, onSort)
+            ColumnLabel(stringResource(R.string.column_size), Modifier.width(60.dp), sort, SortKey.SIZE, onSort, TextAlign.End)
+            ColumnLabel(stringResource(R.string.column_date), Modifier.width(72.dp), sort, SortKey.DATE, onSort, TextAlign.End)
         }
         LazyColumn(Modifier.weight(1f), state = listState) {
             items(entries, key = { it.id }) { item ->
@@ -664,12 +660,12 @@ private fun Pane(
             Modifier.fillMaxWidth().height(4.dp), color = accent, trackColor = divider)
         Row(Modifier.fillMaxWidth().height(27.dp).border(BorderStroke(0.5.dp, divider))
             .padding(horizontal = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text("${entries.size} items", fontSize = 11.sp, color = muted)
+            Text(pluralStringResource(R.plurals.items, entries.size, entries.size), fontSize = 11.sp, color = muted)
             Spacer(Modifier.weight(1f))
             // Ticks every file here, or unticks them when all are ticked already.
             val files = entries.filter { !it.directory }
             if (pickEnabled && files.isNotEmpty()) Text(
-                if (files.all { it.id in picked }) "UNTICK ALL" else "TICK ALL FILES",
+                stringResource(if (files.all { it.id in picked }) R.string.untick_all else R.string.tick_all_files),
                 Modifier.clickable { onPick(files) }.padding(vertical = 4.dp),
                 fontSize = 10.sp, color = accent, fontWeight = FontWeight.Bold, letterSpacing = 0.5.sp)
         }

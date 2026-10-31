@@ -18,6 +18,16 @@ internal data class ContentSection(val title: String, val columns: List<String>,
 internal data class FileView(val name: String, val busy: Boolean = false, val progress: Float? = null,
     val lines: List<String>? = null, val sections: List<ContentSection> = emptyList(), val message: String? = null)
 
+/** The viewer's words; the app fills them from its string resources, tests use these English defaults. */
+internal data class FileLabels(
+    val header: String = "File header", val field: String = "Field", val value: String = "Value",
+    val headerSize: String = "Header size", val protocol: String = "Protocol version",
+    val profile: String = "Profile version", val dataSize: String = "Data size", val fileSize: String = "File size",
+    val headerCrc: String = "Header CRC", val stopped: String = "Decoding stopped",
+    val bytes: (Long) -> String = { "$it bytes" },
+    val truncated: (Int) -> String = { "Only the first $it kB are shown." },
+    val unknown: (String) -> String = { "$it is neither a text file nor a FIT file." })
+
 internal object FileContents {
     /** Text files are shown up to this many bytes. */
     const val TEXT_LIMIT = 1 shl 20
@@ -32,11 +42,11 @@ internal object FileContents {
     fun isText(bytes: ByteArray) = bytes.none { val b = it.toInt() and 0xff; b < 0x20 && b !in 0x09..0x0d && b != 0x1b }
 
     /** Reads what the viewer shows from [input]: a whole FIT file, or the start of anything else. */
-    fun view(name: String, input: InputStream): FileView {
+    fun view(name: String, input: InputStream, labels: FileLabels = FileLabels()): FileView {
         val start = read(input, 12)
-        if (isFit(start)) return view(name, start + read(input, FILE_LIMIT.toInt()), truncated = false)
+        if (isFit(start)) return view(name, start + read(input, FILE_LIMIT.toInt()), truncated = false, labels)
         val bytes = start + read(input, TEXT_LIMIT - start.size)
-        return view(name, bytes, truncated = input.read() != -1)
+        return view(name, bytes, truncated = input.read() != -1, labels)
     }
 
     // InputStream.readNBytes needs Android 13.
@@ -52,15 +62,15 @@ internal object FileContents {
     }
 
     /** Reads [bytes] as the viewer shows it; [truncated] means only the start of the file is in [bytes]. */
-    fun view(name: String, bytes: ByteArray, truncated: Boolean): FileView = when {
-        isFit(bytes) -> FileView(name, sections = fitSections(bytes))
+    fun view(name: String, bytes: ByteArray, truncated: Boolean, labels: FileLabels = FileLabels()): FileView = when {
+        isFit(bytes) -> FileView(name, sections = fitSections(bytes, labels))
         isText(bytes) -> FileView(name, lines = String(bytes, Charsets.UTF_8).lines(),
-            message = if (truncated) "Only the first ${TEXT_LIMIT / 1024} kB are shown." else null)
-        else -> FileView(name, message = "$name is neither a text file nor a FIT file.")
+            message = if (truncated) labels.truncated(TEXT_LIMIT / 1024) else null)
+        else -> FileView(name, message = labels.unknown(name))
     }
 
     /** The file header, then one table per message type in the order they first appear. */
-    fun fitSections(bytes: ByteArray): List<ContentSection> {
+    fun fitSections(bytes: ByteArray, labels: FileLabels = FileLabels()): List<ContentSection> {
         class Table(val title: String) {
             val columns = LinkedHashMap<String, String>()
             val rows = mutableListOf<Map<String, String>>()
@@ -89,22 +99,22 @@ internal object FileContents {
             ContentSection("${table.title} · ${table.rows.size}", table.columns.values.toList(),
                 table.rows.map { row -> table.columns.keys.map { row[it].orEmpty() } })
         }
-        return listOf(header(bytes, failure)) + sections
+        return listOf(header(bytes, failure, labels)) + sections
     }
 
-    private fun header(bytes: ByteArray, failure: Throwable?): ContentSection {
+    private fun header(bytes: ByteArray, failure: Throwable?, labels: FileLabels): ContentSection {
         val data = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
         val size = bytes[0].toInt() and 0xff
         val protocol = bytes[1].toInt() and 0xff
         val rows = listOfNotNull(
-            listOf("Header size", "$size bytes"),
-            listOf("Protocol version", "${protocol shr 4}.${protocol and 0x0f}"),
-            listOf("Profile version", "%.2f".format(Locale.ROOT, (data.getShort(2).toInt() and 0xffff) / 100.0)),
-            listOf("Data size", "${data.getInt(4).toLong() and 0xffffffffL} bytes"),
-            listOf("File size", "${bytes.size} bytes"),
-            if (size >= 14) listOf("Header CRC", "0x%04x".format(data.getShort(12).toInt() and 0xffff)) else null,
-            failure?.let { listOf("Decoding stopped", it.message ?: it.javaClass.simpleName) })
-        return ContentSection("File header", listOf("Field", "Value"), rows)
+            listOf(labels.headerSize, labels.bytes(size.toLong())),
+            listOf(labels.protocol, "${protocol shr 4}.${protocol and 0x0f}"),
+            listOf(labels.profile, "%.2f".format(Locale.ROOT, (data.getShort(2).toInt() and 0xffff) / 100.0)),
+            listOf(labels.dataSize, labels.bytes(data.getInt(4).toLong() and 0xffffffffL)),
+            listOf(labels.fileSize, labels.bytes(bytes.size.toLong())),
+            if (size >= 14) listOf(labels.headerCrc, "0x%04x".format(data.getShort(12).toInt() and 0xffff)) else null,
+            failure?.let { listOf(labels.stopped, it.message ?: it.javaClass.simpleName) })
+        return ContentSection(labels.header, listOf(labels.field, labels.value), rows)
     }
 
     private fun format(field: FieldBase): String = (0 until field.numValues).joinToString(", ") { i ->

@@ -4,6 +4,8 @@ plugins {
 }
 
 android {
+    // Lists the translated languages for Android's per-app language setting (Android 13 and later).
+    androidResources { generateLocaleConfig = true }
     namespace = "cc.buessow.mtpcommander"
     compileSdk {
         version = release(37)
