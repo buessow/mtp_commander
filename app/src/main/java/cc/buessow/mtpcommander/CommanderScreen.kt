@@ -66,7 +66,6 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
-import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalConfiguration
@@ -80,7 +79,6 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
-import androidx.compose.ui.zIndex
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import java.text.SimpleDateFormat
@@ -293,6 +291,44 @@ internal fun CommanderScreen(
             }
         }
     }
+    val button = buttonBounds[when (mode) {
+        CommanderMode.DELETE -> 1; CommanderMode.OPEN -> 2; CommanderMode.VIEW -> 3; else -> 0
+    }]
+    // The help sits between the tool buttons and the list, which makes room for it, and points at its tool.
+    val help = @Composable {
+        if (balloon != null && !balloonHidden) {
+            val target = if (wide) "on the right" else "below"
+            val message = when (balloon) {
+                "view-1" -> "Tap a text or FIT file to see what is in it. FIT files show their header and a table " +
+                    "for each kind of message."
+                "open-1" -> "Tap a file to open it in another app. Files on a watch or in Google Drive are copied to " +
+                    "the phone first."
+                "search-copy-3" -> "Tick search results to copy them. Open the folder to copy into in the list $target, " +
+                    "then press COPY."
+                "search-delete-3" -> "Tick search results to delete them. Nothing is deleted until you press DELETE."
+                "copy-5" -> "Tick files to copy them, or hold a file or folder. Open the folder to copy into in the list " +
+                    "$target, then press COPY."
+                else -> "Tick files to delete them, or hold a file or folder. Nothing is deleted until you press DELETE."
+            }
+            var left by remember { mutableStateOf(0f) }
+            val arrowFill = ink
+            Column(Modifier.fillMaxWidth().onGloballyPositioned { left = it.boundsInRoot().left }
+                .clickable { balloonHidden = true }.padding(bottom = 8.dp)) {
+                Canvas(Modifier.offset { IntOffset((button.center.x - left).toInt() -
+                    with(density) { 9.dp.roundToPx() }, 0) }.size(18.dp, 10.dp)) {
+                    drawPath(Path().apply {
+                        moveTo(size.width / 2, 0f); lineTo(size.width, size.height); lineTo(0f, size.height); close()
+                    }, arrowFill)
+                }
+                Column(Modifier.padding(horizontal = 12.dp).fillMaxWidth()
+                    .background(ink, RoundedCornerShape(8.dp)).padding(12.dp)) {
+                    Text(message, color = paper, fontSize = 13.sp)
+                    Text("TAP TO HIDE", color = paper.copy(alpha = 0.75f), fontSize = 9.sp, letterSpacing = 0.5.sp,
+                        modifier = Modifier.padding(top = 6.dp))
+                }
+            }
+        }
+    }
     val slots = if (mode == CommanderMode.COPY) panes.indices else 0..0
     Box(Modifier.fillMaxSize().background(paper)) {
     // The viewer takes the whole screen; the lists keep their state underneath.
@@ -305,6 +341,7 @@ internal fun CommanderScreen(
                 tools(Modifier.weight(1f).padding(start = 16.dp))
                 paneTitleAndRefresh()
             }
+            help()
             Row(Modifier.weight(1f).fillMaxWidth()) {
                 slots.forEach { slot ->
                     if (slot == 1) Spacer(Modifier.fillMaxHeight().width(1.dp).background(divider))
@@ -319,6 +356,7 @@ internal fun CommanderScreen(
                 paneTitleAndRefresh()
             }
             tools(Modifier.fillMaxWidth())
+            help()
             slots.forEach { slot ->
                 if (slot == 1) Spacer(Modifier.fillMaxWidth().height(1.dp).background(divider))
                 paneSlot(slot, Modifier.weight(1f))
@@ -329,46 +367,6 @@ internal fun CommanderScreen(
         Text(panes[activePane].status,
             Modifier.fillMaxWidth().height(if (wide) 28.dp else 44.dp).padding(horizontal = 12.dp, vertical = 5.dp),
             color = muted, fontSize = 11.sp, maxLines = if (wide) 1 else 2, overflow = TextOverflow.Ellipsis)
-    }
-    val button = buttonBounds[when (mode) {
-        CommanderMode.DELETE -> 1; CommanderMode.OPEN -> 2; CommanderMode.VIEW -> 3; else -> 0
-    }]
-    if (balloon != null && !balloonHidden && button != Rect.Zero) {
-        val target = if (wide) "on the right" else "below"
-        val message = when (balloon) {
-            "view-1" -> "Tap a text or FIT file to see what is in it. FIT files show their header and a table " +
-                "for each kind of message."
-            "open-1" -> "Tap a file to open it in another app. Files on a watch or in Google Drive are copied to " +
-                "the phone first."
-            "search-copy-3" -> "Tick search results to copy them. Open the folder to copy into in the list $target, " +
-                "then press COPY."
-            "search-delete-3" -> "Tick search results to delete them. Nothing is deleted until you press DELETE."
-            "copy-5" -> "Tick files to copy them, or hold a file or folder. Open the folder to copy into in the list " +
-                "$target, then press COPY."
-            else -> "Tick files to delete them, or hold a file or folder. Nothing is deleted until you press DELETE."
-        }
-        Column(Modifier.offset { IntOffset(0, button.bottom.toInt()) }.fillMaxWidth()
-            .clickable { balloonHidden = true }) {
-            // Outlined in paper so the balloon stands out on the dark pane header it overlaps.
-            val arrowFill = ink
-            val arrowEdge = paper
-            Canvas(Modifier.offset { IntOffset(button.center.x.toInt() - with(density) { 9.dp.roundToPx() }, 0) }
-                .size(18.dp, 11.dp).zIndex(1f)) {
-                val arrow = Path().apply {
-                    moveTo(size.width / 2, 0f); lineTo(size.width, size.height + 2.dp.toPx())
-                    lineTo(0f, size.height + 2.dp.toPx()); close()
-                }
-                drawPath(arrow, arrowFill)
-                drawPath(arrow, arrowEdge, style = Stroke(2.dp.toPx()))
-            }
-            Column(Modifier.offset(y = (-2).dp).padding(horizontal = 12.dp).fillMaxWidth()
-                .background(ink, RoundedCornerShape(8.dp)).border(2.dp, paper, RoundedCornerShape(8.dp))
-                .padding(12.dp)) {
-                Text(message, color = paper, fontSize = 13.sp)
-                Text("TAP TO HIDE", color = paper.copy(alpha = 0.75f), fontSize = 9.sp, letterSpacing = 0.5.sp,
-                    modifier = Modifier.padding(top = 6.dp))
-            }
-        }
     }
     }
 }
