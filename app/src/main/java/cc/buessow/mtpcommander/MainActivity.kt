@@ -668,7 +668,7 @@ class MainActivity : ComponentActivity() {
         val open = panes.mapNotNull { it.tree }.toSet()
         local.execute {
             val mounted = granted.mapNotNull { uri -> trees.name(uri)?.let { label ->
-                uri to (driveModels.getOrPut(uri) { garminModel(uri) } ?: label)
+                uri to (driveModels.getOrPut(uri) { garminModel(uri) ?: wahooModel(uri) } ?: label)
             } }
             driveModels.keys.retainAll(mounted.map { it.first }.toSet())
             val grantedVolumes = mounted.map { trees.rootId(it.first).substringBefore(':') }.toSet()
@@ -701,6 +701,21 @@ class MainActivity : ComponentActivity() {
         val fit = trees.list(tree, garmin.id)
             .firstOrNull { !it.folder && it.name.equals("Device.fit", ignoreCase = true) } ?: return null
         GarminModel.productId(trees.read(tree, fit.id, 64 * 1024))?.let { GarminModel.name(it) }
+    }.getOrNull()
+
+    /** On the local executor: a Wahoo names its hardware in system_info.txt at the root of the drive. */
+    private fun wahooModel(tree: Uri): String? = runCatching {
+        val info = trees.list(tree, trees.rootId(tree))
+            .firstOrNull { !it.folder && it.name.equals(WahooModel.FILE, ignoreCase = true) } ?: return null
+        WahooModel.name(String(trees.read(tree, info.id, 4096), Charsets.US_ASCII))
+    }.getOrNull()
+
+    /** On the worker: the same for a Wahoo connected over MTP, looking at the root of [storageId]. */
+    private fun wahooModel(session: MtpDevice, storageId: Int): String? = runCatching {
+        val info = session.getObjectHandles(storageId, 0, -1)?.asSequence()?.mapNotNull(session::getObjectInfo)
+            ?.firstOrNull { it.parent == 0 && it.name.equals(WahooModel.FILE, ignoreCase = true) &&
+                it.compressedSize in 1..4096 } ?: return null
+        session.getObject(info.objectHandle, info.compressedSize)?.let { WahooModel.name(String(it, Charsets.US_ASCII)) }
     }.getOrNull()
 
     /**
@@ -809,7 +824,8 @@ class MainActivity : ComponentActivity() {
                 } ?: emptyList()
                 android.util.Log.i("AndroidMTP", "MTP storages: ${found.map { it.id }}")
                 val garmin = device.vendorId == GARMIN_VENDOR_ID
-                val model = device.productName?.trim()?.takeIf { it.isNotEmpty() }
+                val model = found.firstNotNullOfOrNull { wahooModel(session, it.id) }
+                    ?: device.productName?.trim()?.takeIf { it.isNotEmpty() }
                     ?: session.deviceInfo?.model?.trim()?.takeIf { it.isNotEmpty() }
                 runOnUiThread {
                     if (epoch == epochs[name] && !isDestroyed) {
